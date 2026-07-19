@@ -169,8 +169,8 @@ router.post('/google', authLimiter, async (req, res) => {
         // Create new user with Google OAuth
         isNewUser = true;
         const result = await db.query(
-          `INSERT INTO users (email, full_name, auth_provider, provider_id, email_verified)
-           VALUES ($1, $2, $3, $4, $5)
+          `INSERT INTO users (email, full_name, auth_provider, provider_id, email_verified, password_hash)
+           VALUES ($1, $2, $3, $4, $5, NULL)
            RETURNING id, email, full_name, role, is_active, email_verified, token_version`,
           [email, fullName, 'google', googleId, emailVerified]
         );

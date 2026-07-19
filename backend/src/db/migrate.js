@@ -54,6 +54,12 @@ async function syncUsersColumns() {
     added++;
     console.log(`Added missing column users.${name}`);
   }
+
+  // Some deployments created password_hash as NOT NULL (e.g. an earlier schema or
+  // a third-party managed DB). OAuth/Google users have no password, so relax the
+  // constraint idempotently to prevent "null value in column password_hash".
+  await query(`ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;`);
+
   console.log(added ? `Synced users table (${added} column(s) added).` : 'Users table already in sync.');
 }
 
