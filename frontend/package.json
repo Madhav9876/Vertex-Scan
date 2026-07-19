@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@react-oauth/google": "^0.13.5",
-    "@react-three/drei": "^9.122.0",
+    "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^8.18.0",
     "axios": "^1.6.2",
     "face-api.js": "^0.22.2",
