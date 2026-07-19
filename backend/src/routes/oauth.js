@@ -1,7 +1,7 @@
 // Vertex Scan - OAuth Routes (Google)
 const express = require('express');
-const jwt = require('jsonwebtoken');
 const db = require('../db/connection');
+const { generateToken } = require('../middleware/auth');
 const { logSecurityEvent } = require('../middleware/security');
 const { authLimiter } = require('../middleware/rateLimit');
 
@@ -36,7 +36,7 @@ router.post('/google', authLimiter, async (req, res) => {
 
     // Check if user exists with this Google provider ID
     let userResult = await db.query(
-      'SELECT id, email, full_name, role, is_active, email_verified FROM users WHERE provider_id = $1 AND auth_provider = $2',
+      'SELECT id, email, full_name, role, is_active, email_verified, token_version FROM users WHERE provider_id = $1 AND auth_provider = $2',
       [googleId, 'google']
     );
 
@@ -51,7 +51,7 @@ router.post('/google', authLimiter, async (req, res) => {
       await db.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
     } else {
       // Check if user exists with this email (link accounts or create new)
-      userResult = await db.query('SELECT id, email, full_name, role, is_active, email_verified FROM users WHERE email = $1', [email]);
+      userResult = await db.query('SELECT id, email, full_name, role, is_active, email_verified, token_version FROM users WHERE email = $1', [email]);
 
       if (userResult.rows.length > 0) {
         // User exists with email - link Google account
@@ -72,14 +72,21 @@ router.post('/google', authLimiter, async (req, res) => {
           'INSERT INTO oauth_accounts (user_id, provider, provider_id, email) VALUES ($1, $2, $3, $4) ON CONFLICT (provider, provider_id) DO NOTHING',
           [user.id, 'google', googleId, email]
         );
+        
+        // Refresh user data to include token_version
+        userResult = await db.query(
+          'SELECT id, email, full_name, role, is_active, email_verified, token_version FROM users WHERE id = $1',
+          [user.id]
+        );
+        user = userResult.rows[0];
       } else {
         // Create new user with Google OAuth
         isNewUser = true;
         const result = await db.query(
-          `INSERT INTO users (email, full_name, auth_provider, provider_id, email_verified, password_hash)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING id, email, full_name, role, is_active, email_verified`,
-          [email, fullName, 'google', googleId, emailVerified, null]
+          `INSERT INTO users (email, full_name, auth_provider, provider_id, email_verified)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING id, email, full_name, role, is_active, email_verified, token_version`,
+          [email, fullName, 'google', googleId, emailVerified]
         );
         user = result.rows[0];
 
@@ -91,12 +98,8 @@ router.post('/google', authLimiter, async (req, res) => {
       }
     }
 
-    // Generate JWT token
-    const token = jwt.sign(
-      { userId: user.id, email: user.email },
-      process.env.JWT_SECRET || 'fallback-secret',
-      { expiresIn: '24h' }
-    );
+    // Generate JWT token using the shared function (ensures consistent token format)
+    const token = generateToken(user);
 
     // Log the event
     await logSecurityEvent(
