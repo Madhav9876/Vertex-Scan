@@ -311,6 +311,28 @@ router.post('/logout', authenticateToken, async (req, res) => {
   }
 });
 
+// POST /api/auth/api-key — generate (or rotate) the user's API key.
+// Rotating the key also revokes all existing JWT sessions (token_version bump)
+// so a leaked session cannot keep using the API after the key changes.
+router.post('/api-key', authenticateToken, async (req, res) => {
+  try {
+    const apiKey = generateApiKey();
+    const result = await db.query(
+      `UPDATE users SET api_key = $1, token_version = COALESCE(token_version, 0) + 1, updated_at = NOW()
+       WHERE id = $2 RETURNING api_key`,
+      [apiKey, req.user.id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    await logSecurityEvent('api_key_generated', { ip: req.clientIp, user_id: req.user.id });
+    res.json({ message: 'API key generated', api_key: result.rows[0].api_key });
+  } catch (err) {
+    console.error('API key generation error:', err);
+    res.status(500).json({ error: 'Unable to generate API key. Please try again.' });
+  }
+});
+
 // PATCH /api/auth/password — change password (revokes all sessions after success)
 router.patch('/password', authenticateToken, async (req, res) => {
   try {

@@ -48,8 +48,14 @@ VITE_GOOGLE_CLIENT_ID=YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com
 ### Production (.env.production)
 ```env
 VITE_API_URL=https://vertex-scan.onrender.com
-VITE_GOOGLE_CLIENT_ID=176061589903-m11ubqn7qnn0o0bgagqm6vl6g8bj6805.apps.googleusercontent.com
+VITE_GOOGLE_CLIENT_ID=YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com
 ```
+
+> **IMPORTANT:** The frontend `VITE_GOOGLE_CLIENT_ID` and the backend `GOOGLE_CLIENT_ID`
+> (set in Render / `.env`) MUST be the **exact same** OAuth client ID. If they differ,
+> Google login fails with "Authentication failed" because the backend rejects the token's
+> `aud` (audience) claim. Create your *own* OAuth client in Google Cloud Console — do not
+> reuse a client ID from this repository or third parties.
 
 ## Step 5: Run Database Migration
 
