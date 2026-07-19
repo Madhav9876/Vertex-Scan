@@ -100,7 +100,11 @@ router.post('/register', authLimiter, async (req, res) => {
     }
     if (err && err.message) {
       // Return specific error in development for debugging
-      return res.status(500).json({ error: `Registration failed: ${isDev ? err.message : 'Please try again.'}` });
+      const details = isDev ? err.message : 'Please try again.';
+      const hint = isDev && err.code === '42P01'
+        ? ' The users table may not exist. Run `npm run migrate` to create it.'
+        : '';
+      return res.status(500).json({ error: `Registration failed: ${details}${hint}` });
     }
 
     res.status(500).json({ error: 'Registration failed. Please try again.' });

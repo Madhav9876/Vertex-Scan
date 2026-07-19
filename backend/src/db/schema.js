@@ -2,7 +2,9 @@
 // Based on the DB Schema Document v1.0.0
 
 const SCHEMA_SQL = `
--- Enable UUID extension
+-- Enable UUID extension (required for uuid_generate_v4())
+-- Note: On Supabase, this extension is pre-enabled at the project level.
+-- The IF NOT EXISTS makes this idempotent and safe to re-run.
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- Users table

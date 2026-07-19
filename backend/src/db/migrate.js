@@ -63,7 +63,21 @@ async function migrate() {
     if (process.env.DB_CREATE_ROLE === 'true') {
       await ensureAppRole();
     }
-    await query(SCHEMA_SQL);
+
+    // Run schema SQL; if CREATE EXTENSION fails (e.g. on Supabase managed DB
+    // where the app role lacks CREATE rights), fall back to executing only the
+    // table/DDL portion.
+    try {
+      await query(SCHEMA_SQL);
+    } catch (extErr) {
+      console.warn('Full schema execution failed, attempting partial migration:', extErr.message);
+      // Attempt to create tables without the extension statement
+      const partialSql = SCHEMA_SQL.replace(/CREATE EXTENSION[^;]+;/g, '').trim();
+      if (partialSql) {
+        await query(partialSql);
+      }
+    }
+
     await syncUsersColumns();
     console.log('Migration completed successfully.');
   } catch (err) {
