@@ -29,6 +29,10 @@ router.post('/google', authLimiter, async (req, res) => {
 
     const googleData = await googleRes.json();
 
+    if (googleData.aud !== process.env.GOOGLE_CLIENT_ID) {
+      return res.status(401).json({ error: 'Google token audience mismatch' });
+    }
+
     const email = googleData.email;
     const googleId = googleData.sub;
     const fullName = googleData.name || '';
