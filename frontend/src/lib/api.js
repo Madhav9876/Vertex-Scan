@@ -36,6 +36,7 @@ export const authAPI = {
   login: (data) => api.post('/auth/login', data),
   me: () => api.get('/auth/me'),
   generateApiKey: () => api.post('/auth/api-key'),
+  googleLogin: (credential) => api.post('/oauth/google', { credential }),
 };
 
 export const scansAPI = {
