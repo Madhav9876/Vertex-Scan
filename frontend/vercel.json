@@ -4,7 +4,6 @@
   "framework": "vite",
   "rewrites": [{ "source": "/(.*)", "destination": "/" }],
   "env": {
-    "VITE_API_URL": "https://vertex-scan.onrender.com",
-    "VITE_GOOGLE_CLIENT_ID": "@google_client_id"
+    "VITE_API_URL": "https://vertex-scan.onrender.com"
   }
 }
