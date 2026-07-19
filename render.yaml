@@ -1,0 +1,43 @@
+# Render deployment config for Vertex Scan
+# Repo: https://github.com/Madhav9876/Vertex-Scan
+#
+# Deploy with: connect this repo in Render and select "render.yaml" (Blueprint).
+# Or push to the connected repo and Render will apply this automatically.
+
+databases:
+  - name: vertex-scan-db
+    databaseName: vertex_scan
+    user: vertex_app
+    plan: free
+    postgresMajorVersion: "16"
+
+services:
+  - type: web
+    name: vertex-scan-backend
+    runtime: node
+    region: oregon
+    plan: free
+    rootDir: backend
+    # Use the lockfile already present in the repo (npm).
+    buildCommand: npm install
+    startCommand: node src/index.js
+    healthCheckPath: /api/health
+    # Run schema migrations automatically after each deploy.
+    preDeployCommand: npm run migrate
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: vertex-scan-db
+          property: connectionString
+      - key: DB_SSL
+        value: "true"
+      - key: CORS_ORIGIN
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: DB_CREATE_ROLE
+        value: "false"
