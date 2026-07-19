@@ -4,12 +4,14 @@ import { Mail, Lock, User, Eye, EyeOff } from 'lucide-react';
 import Logo from '../components/Logo';
 import { authAPI } from '../lib/api';
 import DecryptedText from '../components/DecryptedText';
+import { GoogleLogin } from '@react-oauth/google';
 
 export default function Register() {
   const [form, setForm] = useState({ email: '', password: '', full_name: '' });
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
   const navigate = useNavigate();
 
   const handleSubmit = async (e) => {
@@ -32,6 +34,26 @@ export default function Register() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleGoogleSuccess = async (credentialResponse) => {
+    setGoogleLoading(true);
+    setError('');
+    try {
+      const res = await authAPI.googleLogin(credentialResponse.credential);
+      localStorage.setItem('token', res.data.token);
+      localStorage.setItem('user', JSON.stringify(res.data.user));
+      navigate('/dashboard');
+    } catch (err) {
+      setError(err.response?.data?.error || 'Google login failed. Please try again.');
+    } finally {
+      setGoogleLoading(false);
+    }
+  };
+
+  const handleGoogleError = () => {
+    setError('Google sign-up was cancelled or failed. Please try again.');
+    setGoogleLoading(false);
   };
 
   return (
@@ -122,6 +144,31 @@ export default function Register() {
             Already have an account?{' '}
             <Link to="/login" className="text-primary-600 dark:text-primary-400 hover:text-primary-700 dark:hover:text-primary-300 font-medium">Sign in</Link>
           </p>
+
+          {/* Google Sign-In Option */}
+          <div className="mt-4 relative">
+            <div className="absolute inset-0 flex items-center">
+              <div className="w-full border-t border-gray-300 dark:border-gray-600"></div>
+            </div>
+            <div className="relative flex justify-center text-sm">
+              <span className="px-2 bg-white dark:bg-gray-900 text-gray-500 dark:text-gray-400">Or sign up with</span>
+            </div>
+          </div>
+
+          <div className="mt-4 flex justify-center">
+            {googleLoading ? (
+              <div className="text-sm text-gray-500 dark:text-gray-400">Signing up with Google...</div>
+            ) : (
+              <GoogleLogin
+                onSuccess={handleGoogleSuccess}
+                onError={handleGoogleError}
+                useOneTap={false}
+                theme="outline"
+                size="large"
+                width="340"
+              />
+            )}
+          </div>
         </div>
       </div>
     </div>

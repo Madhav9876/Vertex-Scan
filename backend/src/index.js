@@ -23,10 +23,10 @@ app.use(helmet({
   contentSecurityPolicy: isProduction ? {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", 'https://accounts.google.com', 'https://*.google.com', 'https://*.googleapis.com'],
       styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", 'data:'],
-      connectSrc: ["'self'"],
+      imgSrc: ["'self'", 'data:', 'https://*.google.com', 'https://*.googleusercontent.com'],
+      connectSrc: ["'self'", 'https://oauth2.googleapis.com', 'https://*.google.com', 'https://*.googleapis.com'],
       frameAncestors: ["'none'"],
     },
   } : false,
