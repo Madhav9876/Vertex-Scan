@@ -57,10 +57,10 @@ router.post('/register', authLimiter, async (req, res) => {
     const salt = await bcrypt.genSalt(12);
     const password_hash = await bcrypt.hash(password, salt);
 
-    // Create user
+    // Create user - explicitly set auth_provider to 'local' and get all needed fields including token_version
     const result = await db.query(
-      `INSERT INTO users (email, password_hash, full_name) 
-       VALUES ($1, $2, $3) RETURNING id, email, full_name, role, created_at`,
+      `INSERT INTO users (email, password_hash, full_name, auth_provider, updated_at) 
+       VALUES ($1, $2, $3, 'local', NOW()) RETURNING id, email, full_name, role, token_version, created_at`,
       [normalizedEmail, password_hash, (full_name && String(full_name).slice(0, 100)) || null]
     );
 
@@ -85,8 +85,11 @@ router.post('/register', authLimiter, async (req, res) => {
     // Surface safe, actionable errors instead of a generic 500 so the client
     // can show a meaningful message (e.g. duplicate email, DB connection issue).
     const code = err && err.code;
+    const isDev = process.env.NODE_ENV !== 'production';
+    
     if (code === '23505') {
-      await logSecurityEvent('register_duplicate', { ip: req.clientIp, email: String(email).toLowerCase().trim() }).catch(() => {});
+      const normalizedEmail = String(email || '').toLowerCase().trim();
+      await logSecurityEvent('register_duplicate', { ip: req.clientIp, email: normalizedEmail }).catch(() => {});
       return res.status(409).json({ error: 'Email already registered' });
     }
     if (code === '42P01' || code === '42703') {
@@ -94,6 +97,10 @@ router.post('/register', authLimiter, async (req, res) => {
     }
     if (code === 'ECONNREFUSED' || code === 'ETIMEDOUT' || code === '57P01' || (err && /connection/i.test(err.message || ''))) {
       return res.status(503).json({ error: 'Unable to reach the database. Please try again later.' });
+    }
+    if (err && err.message) {
+      // Return specific error in development for debugging
+      return res.status(500).json({ error: `Registration failed: ${isDev ? err.message : 'Please try again.'}` });
     }
 
     res.status(500).json({ error: 'Registration failed. Please try again.' });
@@ -125,9 +132,9 @@ router.post('/login', authLimiter, async (req, res) => {
       });
     }
 
-    // Find user
+    // Find user - include token_version for proper token generation
     const result = await db.query(
-      'SELECT id, email, password_hash, full_name, role, is_active FROM users WHERE email = $1',
+      'SELECT id, email, password_hash, full_name, role, is_active, token_version FROM users WHERE email = $1',
       [normalizedEmail]
     );
 
