@@ -9,17 +9,38 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     email VARCHAR(255) NOT NULL UNIQUE,
-    password_hash VARCHAR(255) NOT NULL,
+    password_hash VARCHAR(255),
     full_name VARCHAR(100),
     role VARCHAR(20) DEFAULT 'user' CHECK (role IN ('user', 'admin', 'api')),
     api_key VARCHAR(64) UNIQUE,
     is_active BOOLEAN DEFAULT true,
     email_verified BOOLEAN DEFAULT false,
     token_version INTEGER DEFAULT 0,
+    auth_provider VARCHAR(20) DEFAULT 'local' CHECK (auth_provider IN ('local', 'google')),
+    provider_id VARCHAR(255),
+    password_reset_token VARCHAR(255),
+    password_reset_expires_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW(),
     last_login_at TIMESTAMP
 );
+
+-- OAuth accounts table (for linking multiple auth providers)
+CREATE TABLE IF NOT EXISTS oauth_accounts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider VARCHAR(20) NOT NULL CHECK (provider IN ('google')),
+    provider_id VARCHAR(255) NOT NULL,
+    email VARCHAR(255) NOT NULL,
+    access_token TEXT,
+    refresh_token TEXT,
+    expires_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(provider, provider_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_oauth_accounts_user_id ON oauth_accounts(user_id);
+CREATE INDEX IF NOT EXISTS idx_oauth_accounts_provider ON oauth_accounts(provider);
 
 -- Scans table
 CREATE TABLE IF NOT EXISTS scans (

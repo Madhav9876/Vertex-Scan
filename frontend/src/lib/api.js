@@ -37,6 +37,8 @@ export const authAPI = {
   me: () => api.get('/auth/me'),
   generateApiKey: () => api.post('/auth/api-key'),
   googleLogin: (credential) => api.post('/oauth/google', { credential }),
+  forgotPassword: (email) => api.post('/auth/forgot-password', { email }),
+  resetPassword: (token, new_password) => api.post('/auth/reset-password', { token, new_password }),
 };
 
 export const scansAPI = {

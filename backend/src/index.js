@@ -9,6 +9,7 @@ const path = require('path');
 const authRoutes = require('./routes/auth');
 const scanRoutes = require('./routes/scans');
 const reportRoutes = require('./routes/reports');
+const oauthRoutes = require('./routes/oauth');
 const { globalLimiter } = require('./middleware/rateLimit');
 const { requestContext, errorHandler, notFoundHandler, logSecurityEvent } = require('./middleware/security');
 
@@ -90,6 +91,7 @@ app.use('/api', globalLimiter);
 // API Routes (unversioned base + /v1 alias for safe future evolution)
 const apiRouter = express.Router();
 apiRouter.use('/auth', authRoutes);
+apiRouter.use('/oauth', oauthRoutes);
 apiRouter.use('/scans', scanRoutes);
 apiRouter.use('/reports', reportRoutes);
 app.use('/api', apiRouter);

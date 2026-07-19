@@ -18,6 +18,45 @@ async function ensureAppRole() {
   console.log(`Ensured least-privilege role: ${role}`);
 }
 
+// Idempotently bring the existing `public.users` table in line with SCHEMA_SQL.
+// `CREATE TABLE IF NOT EXISTS` only creates when the table is absent, so a table
+// that was created before new columns were added would otherwise drift and cause
+// runtime errors like `column "auth_provider" does not exist`. We reconcile every
+// column declared in the schema, adding only the ones that are missing.
+const EXPECTED_USERS_COLUMNS = [
+  `email VARCHAR(255) NOT NULL UNIQUE`,
+  `password_hash VARCHAR(255)`,
+  `full_name VARCHAR(100)`,
+  `role VARCHAR(20) DEFAULT 'user' CHECK (role IN ('user', 'admin', 'api'))`,
+  `api_key VARCHAR(64) UNIQUE`,
+  `is_active BOOLEAN DEFAULT true`,
+  `email_verified BOOLEAN DEFAULT false`,
+  `token_version INTEGER DEFAULT 0`,
+  `auth_provider VARCHAR(20) DEFAULT 'local' CHECK (auth_provider IN ('local', 'google'))`,
+  `provider_id VARCHAR(255)`,
+  `password_reset_token VARCHAR(255)`,
+  `password_reset_expires_at TIMESTAMP`,
+  `created_at TIMESTAMP DEFAULT NOW()`,
+  `updated_at TIMESTAMP DEFAULT NOW()`,
+  `last_login_at TIMESTAMP`,
+];
+
+async function syncUsersColumns() {
+  const existing = await query(
+    `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users'`
+  );
+  const have = new Set(existing.rows.map((r) => r.column_name));
+  let added = 0;
+  for (const def of EXPECTED_USERS_COLUMNS) {
+    const name = def.split(' ')[0];
+    if (have.has(name)) continue;
+    await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS ${def};`);
+    added++;
+    console.log(`Added missing column users.${name}`);
+  }
+  console.log(added ? `Synced users table (${added} column(s) added).` : 'Users table already in sync.');
+}
+
 async function migrate() {
   console.log('Running Vertex Scan database migration...');
   try {
@@ -25,6 +64,7 @@ async function migrate() {
       await ensureAppRole();
     }
     await query(SCHEMA_SQL);
+    await syncUsersColumns();
     console.log('Migration completed successfully.');
   } catch (err) {
     console.error('Migration failed:', err.message);

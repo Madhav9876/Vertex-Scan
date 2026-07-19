@@ -4,6 +4,8 @@ import Layout from './components/Layout';
 import Landing from './pages/Landing';
 import Login from './pages/Login';
 import Register from './pages/Register';
+import ForgotPassword from './pages/ForgotPassword';
+import ResetPassword from './pages/ResetPassword';
 import Dashboard from './pages/Dashboard';
 import NewScan from './pages/NewScan';
 import ScanResults from './pages/ScanResults';
@@ -32,6 +34,8 @@ export default function App() {
       <Route path="/" element={<Landing />} />
       <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
       <Route path="/register" element={<PublicRoute><Register /></PublicRoute>} />
+      <Route path="/forgot-password" element={<PublicRoute><ForgotPassword /></PublicRoute>} />
+      <Route path="/reset-password" element={<PublicRoute><ResetPassword /></PublicRoute>} />
       <Route path="/dashboard" element={<ProtectedRoute><Layout><Dashboard /></Layout></ProtectedRoute>} />
       <Route path="/new-scan" element={<ProtectedRoute><Layout><NewScan /></Layout></ProtectedRoute>} />
       <Route path="/scans/:id" element={<ProtectedRoute><Layout><ScanResults /></Layout></ProtectedRoute>} />

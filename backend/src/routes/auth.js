@@ -1,14 +1,18 @@
 // Vertex Scan - Authentication Routes
 const express = require('express');
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const db = require('../db/connection');
 const { generateToken, generateApiKey, authenticateToken, revokeUserTokens } = require('../middleware/auth');
-const { authLimiter } = require('../middleware/rateLimit');
+const { authLimiter, passwordResetLimiter } = require('../middleware/rateLimit');
 const { isValidEmail, isValidPassword } = require('../utils/validation');
 const { logSecurityEvent } = require('../middleware/security');
+const { sendMail, buildResetEmail } = require('../utils/mailer');
 
 const MAX_LOGIN_FAILURES = 10;
 const LOCKOUT_WINDOW_MINUTES = 15;
+const RESET_TOKEN_BYTES = 32;
+const RESET_TOKEN_TTL_MINUTES = Number(process.env.PASSWORD_RESET_TTL_MINUTES || 30);
 
 // Count recent failed logins for an email (brute-force / anomaly detection)
 async function recentFailureCount(email) {
@@ -77,7 +81,22 @@ router.post('/register', authLimiter, async (req, res) => {
     });
   } catch (err) {
     console.error('Registration error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+
+    // Surface safe, actionable errors instead of a generic 500 so the client
+    // can show a meaningful message (e.g. duplicate email, DB connection issue).
+    const code = err && err.code;
+    if (code === '23505') {
+      await logSecurityEvent('register_duplicate', { ip: req.clientIp, email: String(email).toLowerCase().trim() }).catch(() => {});
+      return res.status(409).json({ error: 'Email already registered' });
+    }
+    if (code === '42P01' || code === '42703') {
+      return res.status(500).json({ error: 'Database schema is missing. Run `npm run migrate`.' });
+    }
+    if (code === 'ECONNREFUSED' || code === 'ETIMEDOUT' || code === '57P01' || (err && /connection/i.test(err.message || ''))) {
+      return res.status(503).json({ error: 'Unable to reach the database. Please try again later.' });
+    }
+
+    res.status(500).json({ error: 'Registration failed. Please try again.' });
   }
 });
 
@@ -150,6 +169,103 @@ router.post('/login', authLimiter, async (req, res) => {
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/forgot-password — generate a reset token and email it to the user.
+// Always returns 200 (same response whether or not the email exists) to avoid
+// leaking which addresses are registered.
+router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
+  try {
+    const { email } = req.body;
+    const normalizedEmail = email ? String(email).toLowerCase().trim() : '';
+
+    if (isValidEmail(normalizedEmail)) {
+      const result = await db.query(
+        'SELECT id, email, full_name, auth_provider FROM users WHERE email = $1 AND is_active = true',
+        [normalizedEmail]
+      );
+
+      if (result.rows.length > 0) {
+        const user = result.rows[0];
+        // Only local accounts have a password to reset.
+        if (user.auth_provider === 'local') {
+          const token = crypto.randomBytes(RESET_TOKEN_BYTES).toString('hex');
+          const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MINUTES * 60 * 1000);
+
+          await db.query(
+            'UPDATE users SET password_reset_token = $1, password_reset_expires_at = $2, updated_at = NOW() WHERE id = $3',
+            [token, expiresAt, user.id]
+          );
+
+          const baseUrl = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
+          const resetUrl = `${baseUrl}/reset-password?token=${token}`;
+          const mail = buildResetEmail({ email: user.email, resetUrl, expiresMinutes: RESET_TOKEN_TTL_MINUTES });
+          try {
+            await sendMail({ to: user.email, ...mail });
+          } catch (mailErr) {
+            console.error('Reset email send failed:', mailErr);
+            await logSecurityEvent('password_reset_email_failed', { ip: req.clientIp, email: normalizedEmail, user_id: user.id });
+          }
+          await logSecurityEvent('password_reset_requested', { ip: req.clientIp, email: normalizedEmail, user_id: user.id });
+        } else {
+          await logSecurityEvent('password_reset_unsupported_provider', { ip: req.clientIp, email: normalizedEmail, user_id: user.id });
+        }
+      } else {
+        await logSecurityEvent('password_reset_unknown_email', { ip: req.clientIp, email: normalizedEmail });
+      }
+    }
+
+    res.json({ message: 'If an account exists for that email, a password reset link has been sent.' });
+  } catch (err) {
+    console.error('Forgot password error:', err);
+    res.status(500).json({ error: 'Unable to process request. Please try again later.' });
+  }
+});
+
+// POST /api/auth/reset-password — verify token and set a new password.
+router.post('/reset-password', passwordResetLimiter, async (req, res) => {
+  try {
+    const { token, new_password } = req.body;
+
+    if (!token || !new_password) {
+      return res.status(400).json({ error: 'Reset token and new password are required' });
+    }
+    if (!isValidPassword(new_password)) {
+      return res.status(400).json({ error: 'New password must be 8-128 characters long' });
+    }
+
+    const result = await db.query(
+      'SELECT id, email, password_reset_token, password_reset_expires_at FROM users WHERE password_reset_token = $1',
+      [String(token)]
+    );
+
+    if (result.rows.length === 0) {
+      await logSecurityEvent('password_reset_invalid_token', { ip: req.clientIp });
+      return res.status(400).json({ error: 'Invalid or expired reset token' });
+    }
+
+    const user = result.rows[0];
+    if (!user.password_reset_expires_at || new Date(user.password_reset_expires_at).getTime() < Date.now()) {
+      await db.query('UPDATE users SET password_reset_token = NULL, password_reset_expires_at = NULL WHERE id = $1', [user.id]);
+      await logSecurityEvent('password_reset_expired_token', { ip: req.clientIp, user_id: user.id });
+      return res.status(400).json({ error: 'Invalid or expired reset token' });
+    }
+
+    const salt = await bcrypt.genSalt(12);
+    const password_hash = await bcrypt.hash(new_password, salt);
+
+    await db.query(
+      'UPDATE users SET password_hash = $1, password_reset_token = NULL, password_reset_expires_at = NULL, token_version = COALESCE(token_version, 0) + 1, updated_at = NOW() WHERE id = $2',
+      [password_hash, user.id]
+    );
+
+    await logSecurityEvent('password_reset_success', { ip: req.clientIp, email: user.email, user_id: user.id });
+
+    res.json({ message: 'Password has been reset. You can now sign in with your new password.' });
+  } catch (err) {
+    console.error('Reset password error:', err);
+    res.status(500).json({ error: 'Unable to reset password. Please try again later.' });
   }
 });
 

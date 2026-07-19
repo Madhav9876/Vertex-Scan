@@ -32,4 +32,13 @@ const scanLimiter = rateLimit({
   message: { error: 'Scan creation rate limit exceeded, please slow down.' },
 });
 
-module.exports = { globalLimiter, authLimiter, scanLimiter };
+// Limiter for password reset endpoints (abuse / token bombing protection)
+const passwordResetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders,
+  legacyHeaders,
+  message: { error: 'Too many password reset attempts, please try again later.' },
+});
+
+module.exports = { globalLimiter, authLimiter, scanLimiter, passwordResetLimiter };
