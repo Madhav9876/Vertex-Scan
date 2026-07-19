@@ -1,0 +1,110 @@
+name: Security & CI
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+  schedule:
+    - cron: '0 6 * * 1'   # weekly dependency scan
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - name: Dependency vulnerability scan
+        run: npm audit --audit-level=moderate
+
+      - name: SAST (Semgrep)
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/security-audit
+            p/secrets
+            p/nodejs
+        env:
+          SEMGREP_RULES: p/security-audit p/secrets p/nodejs
+
+      - name: Start Postgres
+        run: |
+          sudo systemctl start postgresql
+          psql -U postgres -c "ALTER USER postgres PASSWORD 'postgres';"
+          psql -U postgres -c "CREATE DATABASE vertex_scan;"
+      - name: Migrate
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_NAME: vertex_scan
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          JWT_SECRET: ci-test-secret
+          NODE_ENV: test
+        run: npm run migrate
+      - name: Security tests
+        env:
+          BASE_URL: http://localhost:3001
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_NAME: vertex_scan
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          JWT_SECRET: ci-test-secret
+          NODE_ENV: test
+        run: |
+          node src/index.js &
+          SERVER_PID=$!
+          npx wait-on http://localhost:3001/api/health
+          npm run test:security
+          kill $SERVER_PID
+
+      - name: DAST (OWASP ZAP baseline scan)
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: 'http://localhost:3001/api/health'
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-a -j'
+          allow_issue_writing: false
+        continue-on-error: true
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Dependency vulnerability scan
+        run: npm audit --audit-level=moderate
+      - name: Build
+        run: npm run build
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+
