@@ -8,7 +8,9 @@ const ElectricBorder = ({
   chaos = 0.12,
   borderRadius = 24,
   className,
-  style
+  style,
+  quality = 1,
+  enabled = true
 }) => {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
@@ -141,11 +143,18 @@ const ElectricBorder = ({
     const container = containerRef.current;
     if (!canvas || !container) return;
 
+    // Static fallback: keep the CSS glow, skip the per-frame canvas redraw.
+    if (!enabled) {
+      canvas.style.display = 'none';
+      return;
+    }
+    canvas.style.display = 'block';
+
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
     // Configuration
-    const octaves = 10;
+    const octaves = quality < 0.6 ? 5 : 10;
     const lacunarity = 1.6;
     const gain = 0.7;
     const amplitude = chaos;
@@ -154,31 +163,30 @@ const ElectricBorder = ({
     const displacement = 60;
     const borderOffset = 60;
 
+    const dprCap = Math.min(window.devicePixelRatio || 1, 2) * Math.max(0.4, Math.min(1, quality));
+    let lastDpr = dprCap;
+
     const updateSize = () => {
       const rect = container.getBoundingClientRect();
       const width = rect.width + borderOffset * 2;
       const height = rect.height + borderOffset * 2;
 
-      // Use device pixel ratio for sharp rendering
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = width * dpr;
-      canvas.height = height * dpr;
+      canvas.width = width * dprCap;
+      canvas.height = height * dprCap;
       canvas.style.width = `${width}px`;
       canvas.style.height = `${height}px`;
-      ctx.scale(dpr, dpr);
+      ctx.scale(dprCap, dprCap);
 
       return { width, height };
     };
 
     let { width, height } = updateSize();
-    let lastDpr = Math.min(window.devicePixelRatio || 1, 2);
 
     const drawElectricBorder = currentTime => {
       if (!canvas || !ctx) return;
 
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      if (dpr !== lastDpr) {
-        lastDpr = dpr;
+      if (lastDpr !== dprCap) {
+        lastDpr = dprCap;
         const newSize = updateSize();
         width = newSize.width;
         height = newSize.height;
@@ -206,7 +214,8 @@ const ElectricBorder = ({
       const radius = Math.min(borderRadius, maxRadius);
 
       const approximatePerimeter = 2 * (borderWidth + borderHeight) + 2 * Math.PI * radius;
-      const sampleCount = Math.floor(approximatePerimeter / 2);
+      const sampleDivisor = quality < 0.6 ? 4 : 2;
+      const sampleCount = Math.floor(approximatePerimeter / sampleDivisor);
 
       ctx.beginPath();
 

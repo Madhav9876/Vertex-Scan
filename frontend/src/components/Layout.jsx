@@ -25,8 +25,8 @@ export default function Layout({ children }) {
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-[#0a0a1f] transition-colors duration-200">
       {/* Top Navigation */}
-      <header className="fixed top-0 left-0 right-0 z-50 bg-white/80 dark:bg-[#0a0a1f]/80 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 h-16">
-        <div className="flex items-center justify-between h-full px-3 sm:px-4 lg:px-6 gap-2">
+      <header className="fixed top-0 left-0 right-0 z-50 bg-white/80 dark:bg-[#0a0a1f]/80 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 h-16" style={{ paddingTop: 'env(safe-area-inset-top)' }}>
+        <div className="flex items-center justify-between h-full px-3 sm:px-4 lg:px-6 gap-2" style={{ paddingLeft: 'max(0.75rem, env(safe-area-inset-left))', paddingRight: 'max(0.75rem, env(safe-area-inset-right))' }}>
           <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             <button
               className="lg:hidden p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 flex-shrink-0"
@@ -71,7 +71,7 @@ export default function Layout({ children }) {
         fixed top-16 left-0 bottom-0 z-40 w-60 bg-white dark:bg-[#0c0c1a] border-r border-slate-200 dark:border-slate-800 transform transition-transform duration-200 ease-in-out
         lg:translate-x-0
         ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
-      `}>
+      `} style={{ paddingTop: 'env(safe-area-inset-top)' }}>
         <nav className="p-4 space-y-1">
           {navItems.map((item) => {
             const isActive = location.pathname === item.path;
@@ -103,8 +103,8 @@ export default function Layout({ children }) {
       </aside>
 
       {/* Main Content */}
-      <main className="lg:ml-60 pt-16 min-h-screen">
-        <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto">
+      <main className="lg:ml-60 pt-16 min-h-screen" style={{ paddingTop: 'calc(4rem + env(safe-area-inset-top))' }}>
+        <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto" style={{ paddingLeft: 'max(1rem, env(safe-area-inset-left))', paddingRight: 'max(1rem, env(safe-area-inset-right))' }}>
           {children}
         </div>
       </main>

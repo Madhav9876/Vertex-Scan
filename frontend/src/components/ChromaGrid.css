@@ -3,7 +3,7 @@
   width: 100%;
   height: 100%;
   display: grid;
-  grid-template-columns: repeat(var(--cols, 3), 320px);
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
   grid-auto-rows: auto;
   justify-content: center;
   gap: 0.75rem;
@@ -17,19 +17,10 @@
   --r: 220px;
 }
 
-@media (max-width: 1124px) {
+@media (max-width: 640px) {
   .chroma-grid {
-    grid-template-columns: repeat(auto-fit, minmax(320px, 320px));
-    gap: 0.5rem;
-    padding: 0.5rem;
-  }
-}
-
-@media (max-width: 480px) {
-  .chroma-grid {
-    grid-template-columns: 320px;
     gap: 0.75rem;
-    padding: 1rem;
+    padding: 0.5rem;
   }
 }
 
@@ -37,13 +28,15 @@
   position: relative;
   display: flex;
   flex-direction: column;
-  width: 320px;
+  width: 100%;
+  min-width: 0;
   height: auto;
   border-radius: 20px;
   overflow: hidden;
   border: 1px solid #333;
   transition: border-color 0.3s ease;
   background: var(--card-gradient);
+  touch-action: manipulation;
 
   --mouse-x: 50%;
   --mouse-y: 50%;
@@ -52,6 +45,19 @@
 
 .chroma-card:hover {
   border-color: var(--card-border);
+}
+
+/* The grayscale/glow overlay uses backdrop-filter which is expensive on mobile GPUs.
+   Only enable it on devices with a real pointer (mouse). On touch it's hidden. */
+@media (hover: none) {
+  .chroma-overlay,
+  .chroma-fade {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: rgba(0, 0, 0, 0.001);
+    mask-image: none;
+    -webkit-mask-image: none;
+  }
 }
 
 .chroma-card::before {

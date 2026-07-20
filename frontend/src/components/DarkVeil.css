@@ -4,3 +4,15 @@
   display: block;
   will-change: transform;
 }
+
+/* Static fallback when the WebGL shader is disabled (reduced-motion / low-power).
+   Provides a cheap, GPU-friendly gradient so the layout still looks intentional. */
+.darkveil-fallback {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background:
+    radial-gradient(60% 60% at 30% 20%, rgba(168, 85, 247, 0.18), transparent 70%),
+    radial-gradient(50% 50% at 80% 70%, rgba(34, 211, 238, 0.16), transparent 70%);
+}

@@ -7,9 +7,11 @@ import DecryptedText from '../components/DecryptedText';
 import ElectricBorder from '../components/ElectricBorder';
 import ChromaGrid from '../components/ChromaGrid';
 import Lightfall from '../components/Lightfall';
+import { useAnimationBudget } from '../hooks/useAnimationBudget';
 
 export default function Landing() {
   const isDark = true;
+  const budget = useAnimationBudget();
 
   return (
     <div className="relative min-h-screen bg-gradient-to-br from-slate-100 via-cyan-50 to-violet-50 dark:from-[#050510] dark:via-[#120a26] dark:to-[#04101a] text-slate-900 dark:text-white transition-colors duration-200 overflow-hidden">
@@ -21,7 +23,9 @@ export default function Landing() {
           speed={0.6}
           scanlineFrequency={40}
           warpAmount={0.015}
-          resolutionScale={0.5}
+          resolutionScale={0.5 * budget.quality}
+          quality={budget.quality}
+          enabled={budget.allowBackgroundShader}
         />
       </div>
 
@@ -39,9 +43,11 @@ export default function Landing() {
           zoom={3}
           backgroundGlow={0.35}
           opacity={0.9}
-          mouseInteraction={true}
+          mouseInteraction={budget.device.isDesktop}
           mouseStrength={0.6}
           mouseRadius={0.6}
+          quality={budget.quality}
+          enabled={budget.allowBackgroundShader}
         />
       </div>
 
@@ -297,7 +303,7 @@ export default function Landing() {
         </section>
 
         <section className="max-w-7xl mx-auto px-4 sm:px-6 py-12 sm:py-16 lg:py-20 text-center w-full">
-          <ElectricBorder color={isDark ? '#C026D3' : '#06B6D4'} speed={1} chaos={0.12} borderRadius={24} style={{ borderRadius: 24 }}>
+          <ElectricBorder color={isDark ? '#C026D3' : '#06B6D4'} speed={1} chaos={0.12} borderRadius={24} style={{ borderRadius: 24 }} quality={budget.quality} enabled={budget.allowCanvasFx}>
             <div className="bg-gradient-to-r from-cyan-600 via-violet-600 to-fuchsia-600 rounded-2xl p-8 sm:p-12 shadow-xl shadow-fuchsia-500/20">
               <h2 className="text-2xl sm:text-3xl font-bold text-white mb-4">
                 <DecryptedText

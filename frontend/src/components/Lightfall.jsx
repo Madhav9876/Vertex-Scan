@@ -170,6 +170,8 @@ const Lightfall = ({
   className,
   dpr,
   paused = false,
+  quality = 1,
+  enabled = true,
   colors = ['#A6C8FF', '#5227FF', '#FF9FFC'],
   backgroundColor = '#0A29FF',
   speed = 0.5,
@@ -198,13 +200,14 @@ const Lightfall = ({
   const lastTimeRef = useRef(0);
 
   useEffect(() => {
+    if (!enabled) return;
     const container = containerRef.current;
     if (!container) return;
 
     const renderer = new Renderer({
-      dpr: dpr ?? (typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1),
+      dpr: (dpr ?? (typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1)) * Math.max(0.4, Math.min(1, quality)),
       alpha: true,
-      antialias: true
+      antialias: quality >= 0.75
     });
     rendererRef.current = renderer;
     const gl = renderer.gl;
@@ -279,8 +282,15 @@ const Lightfall = ({
       canvas.addEventListener('pointermove', onPointerMove);
     }
 
+    // Cap frame rate on lower-power devices to keep the UI responsive.
+    const targetFps = quality < 0.6 ? 30 : quality < 0.8 ? 45 : 60;
+    const minFrameMs = 1000 / targetFps;
+    let lastRender = 0;
+
     const loop = t => {
       rafRef.current = requestAnimationFrame(loop);
+      if (t - lastRender < minFrameMs) return;
+      lastRender = t;
       uniforms.iTime.value = t * 0.001;
       if (mouseDampening > 0) {
         if (!lastTimeRef.current) lastTimeRef.current = t;
@@ -347,6 +357,20 @@ const Lightfall = ({
     mouseRadius,
     mouseDampening
   ]);
+
+  if (!enabled) {
+    const grad = `linear-gradient(135deg, ${colors?.[0] || '#06B6D4'}22, transparent 60%), linear-gradient(225deg, ${colors?.[1] || '#A855F7'}22, transparent 60%)`;
+    return (
+      <div
+        className={`lightfall-container ${className ?? ''}`}
+        aria-hidden="true"
+        style={{
+          background: grad,
+          ...(mixBlendMode && { mixBlendMode })
+        }}
+      />
+    );
+  }
 
   return (
     <div

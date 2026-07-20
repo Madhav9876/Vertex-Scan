@@ -130,6 +130,16 @@ export const ChromaGrid = ({
     card.style.setProperty('--mouse-y', `${y}px`);
   };
 
+  // Touch fallback: tapping a card reveals the spotlight at the tap point.
+  const handleCardTouch = e => {
+    const card = e.currentTarget;
+    const touch = e.touches?.[0];
+    if (!touch) return;
+    const rect = card.getBoundingClientRect();
+    card.style.setProperty('--mouse-x', `${touch.clientX - rect.left}px`);
+    card.style.setProperty('--mouse-y', `${touch.clientY - rect.top}px`);
+  };
+
   return (
     <div
       ref={rootRef}
@@ -147,6 +157,7 @@ export const ChromaGrid = ({
           key={i}
           className="chroma-card"
           onMouseMove={handleCardMove}
+          onTouchStart={handleCardTouch}
           onClick={() => handleCardClick(c)}
           style={{
             '--card-border': c.borderColor || 'transparent',

@@ -82,7 +82,9 @@ export default function DarkVeil({
   speed = 0.5,
   scanlineFrequency = 0,
   warpAmount = 0,
-  resolutionScale = 1
+  resolutionScale = 1,
+  quality = 1,
+  enabled = true
 }) {
   const ref = useRef(null);
   const frameRef = useRef(0);
@@ -92,10 +94,10 @@ export default function DarkVeil({
   const startTimeRef = useRef(0);
 
   // Track latest prop values via ref to avoid effect re-runs
-  const propsRef = useRef({ hueShift, noiseIntensity, scanlineIntensity, speed, scanlineFrequency, warpAmount, resolutionScale });
+  const propsRef = useRef({ hueShift, noiseIntensity, scanlineIntensity, speed, scanlineFrequency, warpAmount, resolutionScale, quality, enabled });
   useEffect(() => {
-    propsRef.current = { hueShift, noiseIntensity, scanlineIntensity, speed, scanlineFrequency, warpAmount, resolutionScale };
-  }, [hueShift, noiseIntensity, scanlineIntensity, speed, scanlineFrequency, warpAmount, resolutionScale]);
+    propsRef.current = { hueShift, noiseIntensity, scanlineIntensity, speed, scanlineFrequency, warpAmount, resolutionScale, quality, enabled };
+  }, [hueShift, noiseIntensity, scanlineIntensity, speed, scanlineFrequency, warpAmount, resolutionScale, quality, enabled]);
 
   useEffect(() => {
     const canvas = ref.current;
@@ -103,6 +105,13 @@ export default function DarkVeil({
 
     const parent = canvas.parentElement;
     if (!parent) return;
+
+    // Static fallback when motion is disabled / low-power device: skip WebGL entirely.
+    if (!enabled) {
+      canvas.style.display = 'none';
+      return;
+    }
+    canvas.style.display = 'block';
 
     // WebGL support check
     let testGL;
@@ -118,7 +127,7 @@ export default function DarkVeil({
     }
 
     const renderer = new Renderer({
-      dpr: Math.min(window.devicePixelRatio, 2),
+      dpr: Math.min(window.devicePixelRatio || 1, 2) * Math.max(0.4, Math.min(1, propsRef.current.quality)),
       canvas
     });
     rendererRef.current = renderer;
@@ -163,16 +172,24 @@ export default function DarkVeil({
 
     startTimeRef.current = performance.now();
 
-    const loop = () => {
+    // Cap frame rate on lower-power devices to keep the UI responsive.
+    const targetFps = propsRef.current.quality < 0.6 ? 30 : propsRef.current.quality < 0.8 ? 45 : 60;
+    const minFrameMs = 1000 / targetFps;
+    let lastRender = 0;
+
+    const loop = now => {
       const p = propsRef.current;
-      const elapsed = ((performance.now() - startTimeRef.current) / 1000) * p.speed;
-      program.uniforms.uTime.value = elapsed;
-      program.uniforms.uHueShift.value = p.hueShift;
-      program.uniforms.uNoise.value = p.noiseIntensity;
-      program.uniforms.uScan.value = p.scanlineIntensity;
-      program.uniforms.uScanFreq.value = p.scanlineFrequency;
-      program.uniforms.uWarp.value = p.warpAmount;
-      renderer.render({ scene: mesh });
+      if (now - lastRender >= minFrameMs) {
+        lastRender = now;
+        const elapsed = ((performance.now() - startTimeRef.current) / 1000) * p.speed;
+        program.uniforms.uTime.value = elapsed;
+        program.uniforms.uHueShift.value = p.hueShift;
+        program.uniforms.uNoise.value = p.noiseIntensity;
+        program.uniforms.uScan.value = p.scanlineIntensity;
+        program.uniforms.uScanFreq.value = p.scanlineFrequency;
+        program.uniforms.uWarp.value = p.warpAmount;
+        renderer.render({ scene: mesh });
+      }
       frameRef.current = requestAnimationFrame(loop);
     };
 
@@ -202,5 +219,9 @@ export default function DarkVeil({
     };
   }, []); // Run once — props are read from ref
 
-  return <canvas ref={ref} className="darkveil-canvas" />;
+  return enabled ? (
+    <canvas ref={ref} className="darkveil-canvas" />
+  ) : (
+    <div ref={ref} className="darkveil-fallback" aria-hidden="true" />
+  );
 }

@@ -6,6 +6,18 @@
   body {
     @apply bg-slate-50 text-slate-900 antialiased dark:bg-[#0a0a1f] dark:text-slate-100 transition-colors duration-200;
   }
+
+  /* Respect users who prefer reduced motion: kill decorative animation/transitions. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
 }
 
 @layer components {
