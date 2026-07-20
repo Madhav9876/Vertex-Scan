@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { Shield, AlertTriangle, CheckCircle, XCircle, Download, Copy, ChevronDown, ChevronUp, RefreshCw, ArrowLeft, FileText, Code } from 'lucide-react';
+import { Shield, AlertTriangle, CheckCircle, XCircle, Download, Copy, ChevronDown, ChevronUp, RefreshCw, ArrowLeft, FileText, Code, FileDown } from 'lucide-react';
 import { scansAPI, reportsAPI } from '../lib/api';
 import DecryptedText from '../components/DecryptedText';
+import { downloadJSON, downloadCSV, downloadHTML, downloadPDF } from '../lib/reportGenerator';
 
 const severityConfig = {
   critical: { color: 'bg-red-100 text-red-800 border-red-200', icon: XCircle, label: 'Critical' },
@@ -45,13 +46,23 @@ export default function ScanResults() {
     }
   }, [scan?.status]);
 
+  // Record the report generation server-side for audit, then download the real
+  // report built from the actual scan + findings (no placeholders / overlap).
   const handleExport = async (format) => {
+    if (!scan) return;
     setGeneratingReport(true);
     try {
-      await reportsAPI.generate({ scan_id: id, format });
-      alert(`Report generated in ${format.toUpperCase()} format.`);
+      if (['json', 'csv', 'html'].includes(format)) {
+        // Best-effort audit log; ignore failure so download still works.
+        reportsAPI.generate({ scan_id: id, format }).catch(() => {});
+      }
+      if (format === 'json') downloadJSON(scan, findings);
+      else if (format === 'csv') downloadCSV(scan, findings);
+      else if (format === 'html') downloadHTML(scan, findings);
+      else if (format === 'pdf') downloadPDF(scan, findings);
     } catch (err) {
-      alert('Failed to generate report.');
+      console.error('Export error:', err);
+      alert('Failed to generate report. Please try again.');
     } finally {
       setGeneratingReport(false);
     }
@@ -148,6 +159,9 @@ export default function ScanResults() {
             </button>
             <button onClick={() => handleExport('html')} disabled={generatingReport} className="btn-secondary text-sm flex-1 lg:flex-none justify-center whitespace-nowrap">
               <Code size={14} /> HTML
+            </button>
+            <button onClick={() => handleExport('pdf')} disabled={generatingReport || isRunning} className="btn-secondary text-sm flex-1 lg:flex-none justify-center whitespace-nowrap" title={isRunning ? 'Available after scan completes' : 'Download PDF'}>
+              <FileDown size={14} /> PDF
             </button>
           </div>
         </div>
