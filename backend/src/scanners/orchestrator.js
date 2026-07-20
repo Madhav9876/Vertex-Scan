@@ -1,9 +1,12 @@
 // Vertex Scan - Scan Orchestrator
 // Coordinates multi-module scanning, grading, and result aggregation
+// v2.0 - Enhanced scoring with numerical precision, per-module breakdowns, deep-scan support
 
 const { scanHeaders } = require('./headers');
 const { scanTLS } = require('./tls');
 const { scanDirectories } = require('./directories');
+const { fingerprintTarget } = require('./fingerprint');
+const { deepScanTarget } = require('./deepScan');
 const { assertPublicTarget } = require('../utils/validation');
 const db = require('../db/connection');
 
@@ -16,6 +19,7 @@ const SEVERITY_WEIGHTS = {
 };
 
 const MAX_SCORE = 100;
+const CONFIDENCE_MODIFIERS = { high: 1.0, medium: 0.7, low: 0.4 };
 
 async function runScan(scanId, userId) {
   console.log(`[Orchestrator] Starting scan ${scanId}`);
@@ -58,7 +62,12 @@ async function runScan(scanId, userId) {
     const allFindings = [];
     const moduleResults = {};
 
-    // Run enabled modules
+    // Phase 1: Fingerprint the target (always runs)
+    console.log(`[Orchestrator] Fingerprinting target: ${pinned.normalized}`);
+    const fingerprint = await fingerprintTarget(pinned);
+    console.log(`[Orchestrator] Fingerprint: ${JSON.stringify(fingerprint)}`);
+
+    // Phase 2: Run enabled security modules
     if (enabledModules.headers) {
       moduleResults.headers = await runModule('headers', scanId, pinned, allFindings);
     }
@@ -68,11 +77,21 @@ async function runScan(scanId, userId) {
     }
 
     if (enabledModules.directories) {
-      moduleResults.directories = await runModule('directories', scanId, pinned, allFindings);
+      moduleResults.directories = await runModule('directories', scanId, pinned, allFindings, fingerprint);
     }
 
-    // Calculate score and grade
-    const { score, grade } = calculateGrade(allFindings);
+    // Phase 3: Deep scan - identify unique vulnerabilities via smart crawling
+    const deepFindings = await deepScanTarget(pinned, fingerprint, allFindings);
+    allFindings.push(...deepFindings);
+    moduleResults.deepScan = {
+      moduleType: 'deepScan',
+      status: 'completed',
+      findingsCount: deepFindings.length,
+      uniqueVulnerabilities: deepFindings.filter(f => f.isUniqueVulnerability).length
+    };
+
+    // Calculate enhanced score and grade
+    const { score, grade, scoreBreakdown } = calculateEnhancedGrade(allFindings, fingerprint);
 
     // Save all findings to database
     for (const finding of allFindings) {
@@ -94,34 +113,48 @@ async function runScan(scanId, userId) {
 
     const durationMs = Date.now() - startTime;
 
-    // Update scan with results
+    // Update scan with enhanced results
     await db.query(
       `UPDATE scans SET status = $1, grade = $2, score = $3, completed_at = NOW(), 
        duration_ms = $4 WHERE id = $5`,
-      ['completed', grade, score, durationMs, scanId]
+      ['completed', grade, Math.round(score), durationMs, scanId]
     );
 
-    // Log scan completion
+    // Log scan completion with detailed metadata
     await db.query(
       'INSERT INTO scan_history (scan_id, action, performed_by, details) VALUES ($1, $2, $3, $4)',
       [scanId, 'completed', userId, JSON.stringify({
-        score,
+        score: Math.round(score),
+        precisionScore: score,
         grade,
         total_findings: allFindings.length,
-        duration_ms: durationMs
+        duration_ms: durationMs,
+        score_breakdown: scoreBreakdown,
+        fingerprint: {
+          cms: fingerprint.cms,
+          server: fingerprint.server,
+          framework: fingerprint.framework,
+          hosting: fingerprint.hosting,
+          technologies: fingerprint.technologies
+        },
+        deep_scan_findings: deepFindings.length,
+        unique_vulnerabilities: deepFindings.filter(f => f.isUniqueVulnerability).length
       })]
     );
 
-    console.log(`[Orchestrator] Scan ${scanId} completed: Grade ${grade}, Score ${score}, ${allFindings.length} findings`);
+    console.log(`[Orchestrator] Scan ${scanId} completed: Grade ${grade}, Precision Score ${score.toFixed(1)}, ${allFindings.length} findings`);
 
     return {
       scanId,
       status: 'completed',
       grade,
-      score,
+      score: Math.round(score),
+      precisionScore: score,
       totalFindings: allFindings.length,
       durationMs,
-      moduleResults
+      moduleResults,
+      scoreBreakdown,
+      fingerprint
     };
 
   } catch (err) {
@@ -143,7 +176,7 @@ async function runScan(scanId, userId) {
   }
 }
 
-async function runModule(moduleType, scanId, target, allFindings) {
+async function runModule(moduleType, scanId, target, allFindings, fingerprint) {
   console.log(`[Orchestrator] Running module: ${moduleType}`);
 
   const startTime = Date.now();
@@ -167,7 +200,7 @@ async function runModule(moduleType, scanId, target, allFindings) {
         findings = await scanTLS(target);
         break;
       case 'directories':
-        findings = await scanDirectories(target);
+        findings = await scanDirectories(target, fingerprint);
         break;
     }
 
@@ -209,40 +242,163 @@ async function runModule(moduleType, scanId, target, allFindings) {
   }
 }
 
-function calculateGrade(findings) {
+/**
+ * Enhanced grade calculation with:
+ * - Per-module score breakdown
+ * - Confidence-weighted deductions
+ * - Vulnerability density analysis
+ * - Penalty for duplicate/redundant findings
+ * - Technology-specific risk adjustments
+ */
+function calculateEnhancedGrade(findings, fingerprint) {
   if (findings.length === 0) {
-    return { score: 100, grade: 'A+' };
+    return {
+      score: 100,
+      grade: 'A+',
+      scoreBreakdown: {
+        overall: 100,
+        weightedScore: 100,
+        vulnerabilityDensity: 0,
+        penalty: 0,
+        bySeverity: { critical: 0, high: 0, medium: 0, low: 0, info: 0 },
+        byModule: {},
+        confidenceAdjusted: true,
+        deepScanEnabled: true
+      }
+    };
   }
 
-  // Calculate weighted penalty
-  let totalPenalty = 0;
-  const severityCounts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  // Group findings by module for per-module scoring
+  const byModule = {};
+  const bySeverity = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  let totalWeightedPenalty = 0;
+  let uniqueVulnerabilityBonus = 0;
+  let redundantPenalty = 0;
+
+  // Track duplicate titles to penalize redundant findings
+  const titleCounts = {};
 
   for (const finding of findings) {
+    // Track module-level data
+    const mod = finding.category || 'unknown';
+    if (!byModule[mod]) byModule[mod] = [];
+    byModule[mod].push(finding);
+
+    // Track severity counts
+    bySeverity[finding.severity] = (bySeverity[finding.severity] || 0) + 1;
+
+    // Confidence-weighted penalty
     const weight = SEVERITY_WEIGHTS[finding.severity] || 0;
-    totalPenalty += weight;
-    severityCounts[finding.severity] = (severityCounts[finding.severity] || 0) + 1;
+    const confidenceMod = CONFIDENCE_MODIFIERS[finding.confidence] || 0.7;
+    totalWeightedPenalty += weight * confidenceMod;
+
+    // Track unique vulnerability signatures for bonus
+    if (finding.isUniqueVulnerability) {
+      uniqueVulnerabilityBonus += 3;
+    }
+
+    // Penalize redundant findings (same title appearing multiple times)
+    const key = finding.title || '';
+    titleCounts[key] = (titleCounts[key] || 0) + 1;
+    if (titleCounts[key] > 1) {
+      redundantPenalty += 1;
+    }
   }
 
-  // Calculate score (100 - penalty, minimum 0)
-  let score = Math.max(0, MAX_SCORE - totalPenalty);
+  // Calculate per-module scores
+  const moduleScores = {};
+  for (const [mod, modFindings] of Object.entries(byModule)) {
+    let modPenalty = 0;
+    const modSeverity = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+    for (const f of modFindings) {
+      const w = SEVERITY_WEIGHTS[f.severity] || 0;
+      const cm = CONFIDENCE_MODIFIERS[f.confidence] || 0.7;
+      modPenalty += w * cm;
+      modSeverity[f.severity] = (modSeverity[f.severity] || 0) + 1;
+    }
+    // Apply severity deductions per module
+    if (modSeverity.critical > 0) modPenalty += 15;
+    if (modSeverity.high > 0) modPenalty += 10;
+    if (modSeverity.medium > 0) modPenalty += 5;
+
+    const modScore = Math.max(0, MAX_SCORE - modPenalty);
+    moduleScores[mod] = Math.round(modScore * 10) / 10;
+  }
+
+  // Calculate vulnerability density (findings per module)
+  const moduleCount = Object.keys(byModule).length || 1;
+  const vulnerabilityDensity = findings.length / moduleCount;
+
+  // Base score calculation
+  let weightedScore = Math.max(0, MAX_SCORE - totalWeightedPenalty);
 
   // Apply severity-based deductions
-  if (severityCounts.critical > 0) score -= 15;
-  if (severityCounts.high > 0) score -= 10;
-  if (severityCounts.medium > 0) score -= 5;
+  if (bySeverity.critical > 0) weightedScore -= 15;
+  if (bySeverity.high > 0) weightedScore -= 10;
+  if (bySeverity.medium > 0) weightedScore -= 5;
 
-  score = Math.max(0, Math.min(100, score));
+  // Apply redundant finding penalty (capped)
+  redundantPenalty = Math.min(redundantPenalty, 15);
+  weightedScore -= redundantPenalty;
 
-  // Determine grade
+  // Apply unique vulnerability bonus (finding real, distinct issues)
+  weightedScore += Math.min(uniqueVulnerabilityBonus, 10);
+
+  // Technology-specific adjustments from fingerprint
+  if (fingerprint) {
+    // Outdated technology detection
+    if (fingerprint.technologies) {
+      for (const tech of fingerprint.technologies) {
+        if (tech.isOutdated) {
+          weightedScore -= 5;
+        }
+      }
+    }
+    // Missing security.txt or other best practices
+    if (fingerprint.missingSecurityTxt) weightedScore -= 2;
+  }
+
+  // Clamp final score
+  let score = Math.round(Math.max(0, Math.min(100, weightedScore)) * 10) / 10;
+
+  // Determine grade with + modifiers for precision
   let grade;
-  if (score >= 90) grade = severityCounts.critical === 0 && severityCounts.high === 0 ? 'A+' : 'A';
-  else if (score >= 80) grade = 'B';
-  else if (score >= 70) grade = 'C';
-  else if (score >= 60) grade = 'D';
+  if (score >= 97) grade = 'A+';
+  else if (score >= 93) grade = 'A';
+  else if (score >= 90) grade = 'A-';
+  else if (score >= 87) grade = 'B+';
+  else if (score >= 83) grade = 'B';
+  else if (score >= 80) grade = 'B-';
+  else if (score >= 77) grade = 'C+';
+  else if (score >= 73) grade = 'C';
+  else if (score >= 70) grade = 'C-';
+  else if (score >= 67) grade = 'D+';
+  else if (score >= 63) grade = 'D';
+  else if (score >= 60) grade = 'D-';
   else grade = 'F';
 
-  return { score, grade };
+  return {
+    score,
+    grade,
+    scoreBreakdown: {
+      overall: score,
+      weightedScore: Math.round(weightedScore * 10) / 10,
+      penalty: Math.round(totalWeightedPenalty * 10) / 10,
+      vulnerabilityDensity: Math.round(vulnerabilityDensity * 10) / 10,
+      redundantPenalty: Math.round(redundantPenalty * 10) / 10,
+      uniqueVulnerabilityBonus: Math.round(Math.min(uniqueVulnerabilityBonus, 10) * 10) / 10,
+      bySeverity,
+      byModule: moduleScores,
+      confidenceAdjusted: true,
+      deepScanEnabled: true
+    }
+  };
 }
 
-module.exports = { runScan, calculateGrade };
+// Legacy wrapper for backward compatibility
+function calculateGrade(findings) {
+  const result = calculateEnhancedGrade(findings, {});
+  return { score: Math.round(result.score), grade: result.grade };
+}
+
+module.exports = { runScan, calculateGrade, calculateEnhancedGrade };

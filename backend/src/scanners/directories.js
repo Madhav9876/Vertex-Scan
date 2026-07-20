@@ -1,5 +1,6 @@
 // Vertex Scan - Directory Scanner
 // Discovers exposed directories, files, and sensitive endpoints
+// v2.0 - Uses fingerprint data for targeted CMS-specific path discovery
 
 const https = require('https');
 const http = require('http');
@@ -133,6 +134,70 @@ const COMMON_PATHS = [
   { path: '/jmx', severity: 'critical', category: 'service' },
 ];
 
+// CMS-specific discovery paths
+const CMS_PATHS = {
+  'WordPress': [
+    '/wp-links-opml.php',
+    '/wp-cron.php',
+    '/wp-activate.php',
+    '/wp-signup.php',
+    '/wp-trackback.php',
+    '/wp-mail.php',
+    '/wp-json/wp/v2/users/',
+    '/?author=1',
+    '/readme.html',
+    '/xmlrpc.php',
+    '/license.txt'
+  ],
+  'Drupal': [
+    '/user/login',
+    '/user/register',
+    '/user/password',
+    '/node',
+    '/node/1',
+    '/sites/default/files',
+    '/sites/default/settings.php',
+    '/sites/all/libraries',
+    '/core/install.php',
+    '/core/CHANGELOG.txt',
+    '/update.php',
+    '/authorize.php'
+  ],
+  'Joomla': [
+    '/administrator/index.php',
+    '/components',
+    '/modules',
+    '/plugins',
+    '/tmp',
+    '/logs',
+    '/cache',
+    '/includes',
+    '/language',
+    '/templates',
+    '/media'
+  ],
+  'Magento': [
+    '/admin',
+    '/downloader',
+    '/media',
+    '/var',
+    '/app',
+    '/lib',
+    '/pkginfo',
+    '/errors',
+    '/setup',
+    '/dev'
+  ],
+  'Laravel': [
+    '/_debugbar',
+    '/_ignition',
+    '/storage',
+    '/vendor',
+    '/.env.example',
+    '/artisan'
+  ]
+};
+
 const SEVERITY_DESCRIPTIONS = {
   critical: {
     impact: 'Immediate security risk. This path exposes sensitive data or allows unauthorized access.',
@@ -156,16 +221,40 @@ const SEVERITY_DESCRIPTIONS = {
   }
 };
 
-async function scanDirectories(target) {
+async function scanDirectories(target, fingerprint) {
   const findings = [];
   const normalized = typeof target === 'string' ? target : target.normalized;
   const baseUrl = normalized.startsWith('http') ? normalized : `https://${normalized}`;
   const parsed = new URL(baseUrl);
   const baseHost = `${parsed.protocol}//${parsed.host}`;
 
+  // Build path list: start with common paths, then augment with fingerprint data
+  let paths = [...COMMON_PATHS];
+
+  // Add CMS-specific paths based on fingerprint
+  if (fingerprint && fingerprint.cms && CMS_PATHS[fingerprint.cms]) {
+    const cmsPaths = CMS_PATHS[fingerprint.cms].map(p => ({
+      path: p,
+      severity: 'medium',
+      category: 'cms'
+    }));
+    paths = [...cmsPaths, ...paths];
+    console.log(`[Directories] Added ${cmsPaths.length} CMS-specific paths for ${fingerprint.cms}`);
+  }
+
+  // Add fingerprint-discovered paths (if any)
+  if (fingerprint && fingerprint.detectedPaths && fingerprint.detectedPaths.length > 0) {
+    const discoveredPaths = fingerprint.detectedPaths.map(p => ({
+      path: p,
+      severity: 'low',
+      category: 'discovered'
+    }));
+    paths = [...paths, ...discoveredPaths];
+    console.log(`[Directories] Added ${discoveredPaths.length} fingerprint-discovered paths`);
+  }
+
   // Scan in batches to avoid overwhelming the target
   const batchSize = 10;
-  const paths = [...COMMON_PATHS];
   
   for (let i = 0; i < paths.length; i += batchSize) {
     const batch = paths.slice(i, i + batchSize);
@@ -249,7 +338,7 @@ function fetchUrl(urlStr, target) {
     const options = {
       timeout: 5000,
       headers: {
-        'User-Agent': 'Vertex-Scan/1.0 (Security Scanner)',
+        'User-Agent': 'Vertex-Scan/2.0 (Security Scanner)',
         'Accept': '*/*'
       }
     };
