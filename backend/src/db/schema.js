@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS scans (
 CREATE TABLE IF NOT EXISTS findings (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     scan_id UUID NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
-    category VARCHAR(20) NOT NULL CHECK (category IN ('headers', 'tls', 'directories')),
+    category VARCHAR(20) NOT NULL CHECK (category IN ('headers', 'tls', 'directories', 'deepScan')),
     severity VARCHAR(10) NOT NULL CHECK (severity IN ('critical', 'high', 'medium', 'low', 'info')),
     title VARCHAR(255) NOT NULL,
     description TEXT NOT NULL,

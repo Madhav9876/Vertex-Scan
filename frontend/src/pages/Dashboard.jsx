@@ -197,6 +197,9 @@ export default function Dashboard() {
                   {scan.grade}
                 </span>
               )}
+              {scan.score != null && (
+                <span className="text-sm text-gray-500 dark:text-gray-400">{scan.score}/100</span>
+              )}
               <ArrowRight className="text-gray-300 dark:text-gray-600" size={16} />
             </div>
           </Link>

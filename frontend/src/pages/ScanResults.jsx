@@ -134,6 +134,10 @@ export default function ScanResults() {
                     encryptedClassName="text-gray-600"
                   />
                 </div>
+                <div className="mt-2 text-xl font-semibold text-gray-700 dark:text-gray-200">
+                  {scan.score != null ? `${scan.score}/100` : '-'}
+                </div>
+                <div className="text-xs text-gray-500 dark:text-gray-400">Score</div>
               </div>
             <div className="min-w-0">
               <h1 className="text-lg sm:text-xl font-bold text-gray-900 dark:text-white break-all">{scan.target_url}</h1>

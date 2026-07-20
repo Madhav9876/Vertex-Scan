@@ -65,6 +65,16 @@ async function syncUsersColumns() {
   // idempotently so key generation/rotation never fails on insertion.
   await query(`ALTER TABLE users ALTER COLUMN api_key TYPE VARCHAR(128);`);
 
+  // The findings.category column originally only allowed ('headers','tls','directories').
+  // The deep-scan module inserts findings with category='deepScan', which violates that
+  // CHECK constraint and aborts the entire scan (status -> failed). Recreate the
+  // constraint to include 'deepScan' so deep-scan findings persist.
+  await query(`
+    ALTER TABLE findings DROP CONSTRAINT IF EXISTS findings_category_check;
+    ALTER TABLE findings ADD CONSTRAINT findings_category_check
+      CHECK (category IN ('headers', 'tls', 'directories', 'deepScan'));
+  `);
+
   console.log(added ? `Synced users table (${added} column(s) added).` : 'Users table already in sync.');
 }
 
