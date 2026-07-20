@@ -2,10 +2,9 @@
 // Identifies unique, site-specific vulnerabilities through smart crawling
 // and technology-aware analysis. Eliminates repetitive risk assessments
 // by generating vulnerability signatures and detecting duplicates.
+// v2.0 - Uses pinned request utility with proper timeout handling
 
-const https = require('https');
-const http = require('http');
-const { buildPinnedUrl, applyPinnedTarget } = require('../utils/validation');
+const { pinnedGet } = require('../utils/request');
 
 // CMS-specific vulnerability checks
 const CMS_VULNERABILITY_CHECKS = {
@@ -277,6 +276,9 @@ const GENERIC_DEEP_CHECKS = [
   }
 ];
 
+// Maximum concurrent HTTP connections to prevent socket exhaustion
+const MAX_CONCURRENT = 5;
+
 async function deepScanTarget(target, fingerprint, existingFindings) {
   const normalized = typeof target === 'string' ? target : target.normalized;
   const baseUrl = normalized.startsWith('http') ? normalized : `https://${normalized}`;
@@ -321,12 +323,12 @@ async function deepScanTarget(target, fingerprint, existingFindings) {
   if (fingerprint && fingerprint.detectedPaths && fingerprint.detectedPaths.length > 0) {
     console.log(`[DeepScan] Analyzing ${fingerprint.detectedPaths.length} discovered paths`);
     const uniquePaths = fingerprint.detectedPaths.filter(p => {
-      // Filter out paths already checked by the directories scanner
       return !isCommonPath(p);
     });
 
-    // Check discovered paths for sensitive content
-    for (const path of uniquePaths.slice(0, 20)) { // Limit to 20 discovered paths
+    // Limit to at most 10 discovered paths to avoid hangs
+    const pathsToCheck = uniquePaths.slice(0, 10);
+    for (const path of pathsToCheck) {
       try {
         const finding = await analyzeDiscoveredPath(baseHost, target, path);
         if (finding) {
@@ -338,12 +340,12 @@ async function deepScanTarget(target, fingerprint, existingFindings) {
           }
         }
       } catch (e) {
-        // Skip failed path checks
+        // Skip failed path checks silently
       }
     }
   }
 
-  // Phase 3: Generic deep checks (with dedup against existing findings)
+  // Phase 3: Generic deep checks with limited concurrency
   for (const check of GENERIC_DEEP_CHECKS) {
     try {
       const finding = await performGenericDeepCheck(baseHost, target, check, fingerprint);
@@ -361,14 +363,18 @@ async function deepScanTarget(target, fingerprint, existingFindings) {
   }
 
   // Phase 4: Cookie security analysis
-  const cookieFindings = await analyzeCookieSecurity(baseHost, target);
-  for (const finding of cookieFindings) {
-    const sig = generateVulnerabilitySignature(finding);
-    if (!vulnerabilitySignatures.has(sig)) {
-      finding.isUniqueVulnerability = true;
-      deepFindings.push(finding);
-      vulnerabilitySignatures.add(sig);
+  try {
+    const cookieFindings = await analyzeCookieSecurity(baseHost, target);
+    for (const finding of cookieFindings) {
+      const sig = generateVulnerabilitySignature(finding);
+      if (!vulnerabilitySignatures.has(sig)) {
+        finding.isUniqueVulnerability = true;
+        deepFindings.push(finding);
+        vulnerabilitySignatures.add(sig);
+      }
     }
+  } catch (e) {
+    console.error(`[DeepScan] Cookie analysis failed:`, e.message);
   }
 
   // Phase 5: Technology-specific outdated version warnings
@@ -403,14 +409,18 @@ async function deepScanTarget(target, fingerprint, existingFindings) {
   }
 
   // Phase 6: Form analysis for security issues
-  const formFindings = await analyzeFormSecurity(baseHost, target);
-  for (const finding of formFindings) {
-    const sig = generateVulnerabilitySignature(finding);
-    if (!vulnerabilitySignatures.has(sig)) {
-      finding.isUniqueVulnerability = true;
-      deepFindings.push(finding);
-      vulnerabilitySignatures.add(sig);
+  try {
+    const formFindings = await analyzeFormSecurity(baseHost, target);
+    for (const finding of formFindings) {
+      const sig = generateVulnerabilitySignature(finding);
+      if (!vulnerabilitySignatures.has(sig)) {
+        finding.isUniqueVulnerability = true;
+        deepFindings.push(finding);
+        vulnerabilitySignatures.add(sig);
+      }
     }
+  } catch (e) {
+    console.error(`[DeepScan] Form analysis failed:`, e.message);
   }
 
   console.log(`[DeepScan] Completed: ${deepFindings.length} unique findings from deep scan`);
@@ -433,10 +443,8 @@ function generateVulnerabilitySignature(finding) {
 }
 
 async function performCMSDeepCheck(baseHost, target, check, fingerprint) {
-  const url = `${baseHost}${check.path}`;
-
   try {
-    const data = await fetchUrlData(url, target);
+    const data = await fetchUrlData(target, check.path);
     if (!data) return null;
 
     const isAccessible = data.statusCode >= 200 && data.statusCode < 400;
@@ -455,7 +463,7 @@ async function performCMSDeepCheck(baseHost, target, check, fingerprint) {
         confidence: check.confidence,
         isUniqueVulnerability: true,
         metadata: {
-          url,
+          path: check.path,
           status_code: data.statusCode,
           cms: fingerprint.cms,
           check_type: 'cms_specific'
@@ -469,10 +477,8 @@ async function performCMSDeepCheck(baseHost, target, check, fingerprint) {
 }
 
 async function analyzeDiscoveredPath(baseHost, target, path) {
-  const url = `${baseHost}${path}`;
-
   try {
-    const data = await fetchUrlData(url, target);
+    const data = await fetchUrlData(target, path);
     if (!data || data.statusCode >= 400) return null;
 
     // Check if the discovered path reveals sensitive information
@@ -502,9 +508,8 @@ async function analyzeDiscoveredPath(baseHost, target, path) {
           confidence: 'medium',
           isUniqueVulnerability: true,
           metadata: {
-            url,
-            status_code: data.statusCode,
             discovered_path: path,
+            status_code: data.statusCode,
             path_type: sp.type
           }
         };
@@ -525,9 +530,8 @@ async function analyzeDiscoveredPath(baseHost, target, path) {
       confidence: 'low',
       isUniqueVulnerability: true,
       metadata: {
-        url,
-        status_code: data.statusCode,
-        discovered_path: path
+        discovered_path: path,
+        status_code: data.statusCode
       }
     };
   } catch (e) {
@@ -538,31 +542,29 @@ async function analyzeDiscoveredPath(baseHost, target, path) {
 async function performGenericDeepCheck(baseHost, target, check, fingerprint) {
   switch (check.checkType) {
     case 'reflected_xss':
-      return checkReflectedXSS(baseHost, target);
+      return checkReflectedXSS(target);
     case 'open_redirect':
-      return checkOpenRedirect(baseHost, target);
+      return checkOpenRedirect(target);
     case 'dir_listing':
-      return checkDirectoryListing(baseHost, target);
+      return checkDirectoryListing(target);
     case 'csrf_missing':
-      return checkCSRFProtection(baseHost, target, fingerprint);
+      return checkCSRFProtection(target, fingerprint);
     case 'insecure_cookies':
       return null; // Handled separately in analyzeCookieSecurity
     case 'api_headers':
-      return checkAPIHeaders(baseHost, target);
+      return checkAPIHeaders(target);
     default:
       return null;
   }
 }
 
-async function checkReflectedXSS(baseHost, target) {
+async function checkReflectedXSS(target) {
   const testPayload = '<script>alert(1)</script>';
-  const testUrl = `${baseHost}/?q=${encodeURIComponent(testPayload)}&search=${encodeURIComponent(testPayload)}`;
 
   try {
-    const data = await fetchUrlData(testUrl, target);
+    const data = await fetchUrlData(target, `/?q=${encodeURIComponent(testPayload)}&search=${encodeURIComponent(testPayload)}`);
     if (!data || !data.body) return null;
 
-    // Check if the payload is reflected in the response
     if (data.body.includes(testPayload)) {
       return {
         category: 'deepScan',
@@ -588,17 +590,14 @@ async function checkReflectedXSS(baseHost, target) {
   return null;
 }
 
-async function checkOpenRedirect(baseHost, target) {
-  const testUrl = `${baseHost}/?redirect=${encodeURIComponent('https://evil.com')}&url=${encodeURIComponent('https://evil.com')}&next=${encodeURIComponent('https://evil.com')}`;
-
+async function checkOpenRedirect(target) {
   try {
-    const data = await fetchUrlData(testUrl, target);
+    const data = await fetchUrlData(target, `/?redirect=${encodeURIComponent('https://evil.com')}&url=${encodeURIComponent('https://evil.com')}&next=${encodeURIComponent('https://evil.com')}`);
     if (!data) return null;
 
-    // Check if we got redirected to the external domain
     if (data.statusCode >= 300 && data.statusCode < 400) {
-      const location = data.headers['location'] || data.headers['Location'] || '';
-      if (location.includes('evil.com')) {
+      const location = getHeader(data.headers, 'location');
+      if (location && location.includes('evil.com')) {
         return {
           category: 'deepScan',
           severity: 'medium',
@@ -624,16 +623,14 @@ async function checkOpenRedirect(baseHost, target) {
   return null;
 }
 
-async function checkDirectoryListing(baseHost, target) {
-  // Check common directories that might have listing enabled
+async function checkDirectoryListing(target) {
   const dirsToCheck = ['/images/', '/css/', '/js/', '/assets/', '/uploads/', '/static/'];
 
   for (const dir of dirsToCheck) {
     try {
-      const data = await fetchUrlData(`${baseHost}${dir}`, target);
+      const data = await fetchUrlData(target, dir);
       if (!data || !data.body) continue;
 
-      // Check if response contains directory listing indicators
       const listingIndicators = [
         /Index of /i,
         /<title>Index of /i,
@@ -671,12 +668,11 @@ async function checkDirectoryListing(baseHost, target) {
   return null;
 }
 
-async function checkCSRFProtection(baseHost, target, fingerprint) {
+async function checkCSRFProtection(target, fingerprint) {
   try {
-    const data = await fetchUrlData(baseHost, target);
+    const data = await fetchUrlData(target, '/');
     if (!data || !data.body) return null;
 
-    // Check for forms without CSRF tokens
     const formRegex = /<form[^>]*>/gi;
     const csrfPatterns = [
       /csrf/i, /_token/i, /authenticity_token/i, /__RequestVerificationToken/i,
@@ -691,10 +687,8 @@ async function checkCSRFProtection(baseHost, target, fingerprint) {
       formCount++;
       const formTag = match[0];
 
-      // Check if form has CSRF protection
       const hasCSRF = csrfPatterns.some(p => p.test(formTag));
       if (!hasCSRF) {
-        // Check if there's a hidden input with CSRF token nearby
         const formEnd = data.body.indexOf('</form>', match.index);
         const formContent = formEnd > -1
           ? data.body.substring(match.index, formEnd)
@@ -732,25 +726,24 @@ async function checkCSRFProtection(baseHost, target, fingerprint) {
   return null;
 }
 
-async function checkAPIHeaders(baseHost, target) {
-  // Check if there are API endpoints and if they have proper security headers
+async function checkAPIHeaders(target) {
   const apiPaths = ['/api', '/api/v1', '/api/v2', '/graphql'];
 
   for (const apiPath of apiPaths) {
     try {
-      const data = await fetchUrlData(`${baseHost}${apiPath}`, target);
+      const data = await fetchUrlData(target, apiPath);
       if (!data || data.statusCode >= 400) continue;
 
       const headers = data.headers;
       const missingHeaders = [];
 
-      if (!headers['x-content-type-options'] && !headers['X-Content-Type-Options']) {
+      if (!getHeader(headers, 'x-content-type-options')) {
         missingHeaders.push('X-Content-Type-Options');
       }
-      if (!headers['x-frame-options'] && !headers['X-Frame-Options']) {
+      if (!getHeader(headers, 'x-frame-options')) {
         missingHeaders.push('X-Frame-Options');
       }
-      if (!headers['cache-control'] && !headers['Cache-Control']) {
+      if (!getHeader(headers, 'cache-control')) {
         missingHeaders.push('Cache-Control');
       }
 
@@ -784,7 +777,7 @@ async function analyzeCookieSecurity(baseHost, target) {
   const findings = [];
 
   try {
-    const data = await fetchUrlData(baseHost, target);
+    const data = await fetchUrlData(target, '/');
     if (!data || !data.headers) return findings;
 
     const setCookieHeaders = data.headers['set-cookie'] || [];
@@ -797,7 +790,6 @@ async function analyzeCookieSecurity(baseHost, target) {
       const hasSecure = /;\s*secure/i.test(cookieStr);
       const hasHttpOnly = /;\s*httponly/i.test(cookieStr);
       const hasSameSite = /;\s*samesite=/i.test(cookieStr);
-      const sameSiteValue = (cookieStr.match(/samesite=(\w+)/i) || [])[1];
 
       if (!hasSecure) {
         findings.push({
@@ -870,7 +862,7 @@ async function analyzeFormSecurity(baseHost, target) {
   const findings = [];
 
   try {
-    const data = await fetchUrlData(baseHost, target);
+    const data = await fetchUrlData(target, '/');
     if (!data || !data.body) return findings;
 
     // Check for password fields without proper attributes
@@ -880,7 +872,6 @@ async function analyzeFormSecurity(baseHost, target) {
     while ((match = passwordFieldRegex.exec(data.body)) !== null) {
       const field = match[0];
 
-      // Check for autocomplete attribute
       if (!/autocomplete\s*=\s*["']off["']/i.test(field)) {
         findings.push({
           category: 'deepScan',
@@ -901,12 +892,10 @@ async function analyzeFormSecurity(baseHost, target) {
       }
     }
 
-    // Check for file upload fields
     const fileUploadRegex = /<input[^>]*type=["']file["'][^>]*>/gi;
     while ((match = fileUploadRegex.exec(data.body)) !== null) {
       const field = match[0];
 
-      // Check for accept attribute
       if (!/accept\s*=\s*["']/i.test(field)) {
         findings.push({
           category: 'deepScan',
@@ -933,6 +922,18 @@ async function analyzeFormSecurity(baseHost, target) {
   return findings;
 }
 
+// Case-insensitive header lookup
+function getHeader(headers, name) {
+  if (!headers) return null;
+  const lower = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === lower) {
+      return headers[key];
+    }
+  }
+  return null;
+}
+
 function isCommonPath(path) {
   const commonPaths = [
     '/admin', '/administrator', '/wp-admin', '/wp-content', '/wp-includes',
@@ -944,45 +945,17 @@ function isCommonPath(path) {
   return commonPaths.some(cp => path.startsWith(cp));
 }
 
-function fetchUrlData(urlStr, target) {
-  return new Promise((resolve) => {
-    const isHttps = urlStr.startsWith('https');
-    const client = isHttps ? https : http;
-
-    const options = {
-      timeout: 8000,
-      headers: {
-        'User-Agent': 'Vertex-Scan/2.0 (Deep Security Scanner)',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-      },
-      rejectUnauthorized: false,
-      maxRedirects: 5
-    };
-
-    if (target && target.resolvedAddress) {
-      applyPinnedTarget(options, target);
-    }
-
-    const req = client.get(urlStr, options, (res) => {
-      let body = '';
-      res.on('data', (chunk) => {
-        body += chunk.toString('utf8').substring(0, 100000);
-      });
-      res.on('end', () => {
-        resolve({
-          statusCode: res.statusCode,
-          headers: res.headers,
-          body
-        });
-      });
-    });
-
-    req.on('error', () => resolve(null));
-    req.on('timeout', () => {
-      req.destroy();
-      resolve(null);
-    });
-  });
+/**
+ * Fetch URL data using the pinned request utility with guaranteed timeout.
+ * Uses pinnedGet which sets a hard timeout on the socket to prevent hangs.
+ */
+async function fetchUrlData(target, path) {
+  try {
+    const result = await pinnedGet(target, path, { timeout: 8000, maxBodySize: 100000 });
+    return result;
+  } catch (e) {
+    return null;
+  }
 }
 
 module.exports = { deepScanTarget, generateVulnerabilitySignature };

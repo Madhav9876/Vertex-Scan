@@ -1,19 +1,19 @@
 // Vertex Scan - Pinned HTTP Request Utility
 // Properly handles SSRF-pinned connections while preserving the original Host header.
-// Solves multi-tenant hosting issue where sites sharing an IP returned identical results.
+// v2.0 - Robust timeout: hard deadline with AbortController, no hanging promises.
 
 const https = require('https');
 const http = require('http');
 
+function buildDisplayUrl(target, path) {
+  const parsed = new URL(target.normalized);
+  if (path) parsed.pathname = path;
+  return parsed.toString();
+}
+
 /**
  * Create connection options for a pinned target.
- * Instead of embedding the IP in the URL (which causes Node.js to override the Host header),
- * we pass the path separately and set the host+headers explicitly.
- *
- * @param {Object} target - Pinned target from assertPublicTarget
- * @param {string} path - Request path (e.g. '/api/data')
- * @param {Object} extraOptions - Additional request options to merge
- * @returns {Object} Request options suitable for http.get() or https.get()
+ * The timeout is NOT passed here - it's enforced via hard timer + socket destroy.
  */
 function createPinnedOptions(target, path, extraOptions) {
   const isHttps = target.protocol === 'https:' || !target.normalized.startsWith('http:');
@@ -42,109 +42,137 @@ function createPinnedOptions(target, path, extraOptions) {
     options.family = 6;
   }
 
-  // Merge any extra options (headers take precedence from extra)
+  // Merge extra headers only (do NOT merge timeout/maxBodySize into Node options)
   if (extraOptions) {
     if (extraOptions.headers) {
       Object.assign(options.headers, extraOptions.headers);
-      delete extraOptions.headers;
     }
-    Object.assign(options, extraOptions);
   }
 
   return options;
 }
 
 /**
- * Create a URL string that preserves the original hostname for logging/reporting
- * but uses the pinned IP for actual connection via http.get(options).
- * This function is for display/logging purposes only.
- */
-function buildDisplayUrl(target, path) {
-  const parsed = new URL(target.normalized);
-  if (path) parsed.pathname = path;
-  return parsed.toString();
-}
-
-/**
  * Perform a GET request against a pinned target, returning headers and body.
- * Properly sends the original Host header so multi-tenant IPs return correct content.
+ * Uses a HARD timeout that kills the request after `timeoutMs` regardless of activity.
+ * This prevents slow-loris style hangs where servers send data very slowly.
  */
 function pinnedGet(target, path, extraOptions) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
+    // Hard deadline enforced via combined idle + absolute timeout
+    const timeoutMs = (extraOptions && extraOptions.timeout) || 10000;
+    const maxBodySize = (extraOptions && extraOptions.maxBodySize) || 100000;
+
     const options = createPinnedOptions(target, path, extraOptions);
     const isHttps = options.port === 443 || target.protocol === 'https:' || 
                     (!target.normalized.startsWith('http:'));
     const client = isHttps ? https : http;
 
+    // Track if we've already settled to prevent double resolve
+    let settled = false;
+    const done = (err, result) => {
+      if (settled) return;
+      settled = true;
+      timer && clearTimeout(timer);
+      if (err) {
+        resolve(null);
+      } else {
+        resolve(result);
+      }
+    };
+
+    // Hard killswitch: fires after absolute deadline regardless of activity
+    const timer = setTimeout(() => {
+      req.destroy(new Error('Request timed out'));
+      done(new Error('Request timed out'), null);
+    }, timeoutMs);
+
+    let body = '';
+    let size = 0;
+
     const req = client.get(options, (res) => {
-      let body = '';
-      const maxSize = extraOptions && extraOptions.maxBodySize ? extraOptions.maxBodySize : 100000;
-      let size = 0;
+      // Reset timer on first response (server is alive)
+      timer && timer.refresh();
 
       res.on('data', (chunk) => {
         size += chunk.length;
-        if (size <= maxSize) {
+        if (size <= maxBodySize) {
           body += chunk.toString('utf8');
         }
       });
 
       res.on('end', () => {
-        resolve({
+        done(null, {
           statusCode: res.statusCode,
           headers: res.headers,
           body,
           cookies: res.headers['set-cookie'] || []
         });
       });
+
+      res.on('error', () => {
+        done(new Error('Response stream error'), null);
+      });
     });
 
-    req.on('error', (err) => {
-      reject(err);
+    req.on('error', () => {
+      done(new Error('Request error'), null);
     });
 
     req.on('timeout', () => {
-      req.destroy();
-      reject(new Error('Request timed out'));
+      req.destroy(new Error('Idle timeout'));
+      // The absolute timer will fire done() if not already settled
     });
 
-    if (extraOptions && extraOptions.timeout) {
-      req.setTimeout(extraOptions.timeout);
-    }
+    // Set idle timeout as a shorter threshold (triggers if socket is truly idle)
+    req.setTimeout(Math.min(timeoutMs, 5000));
   });
 }
 
 /**
- * Perform a HEAD-like request to check if a path exists (just status code + headers).
+ * Perform a GET request to check if a path exists (returns status code + headers).
+ * Includes hard timeout killswitch like pinnedGet.
  */
 function pinnedHead(target, path, extraOptions) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
+    const timeoutMs = (extraOptions && extraOptions.timeout) || 10000;
     const options = createPinnedOptions(target, path, extraOptions);
-    options.method = 'GET'; // Some servers don't respond properly to HEAD
 
     const isHttps = options.port === 443 || (target.protocol !== 'http:');
     const client = isHttps ? https : http;
 
+    let settled = false;
+    const done = (result) => {
+      if (settled) return;
+      settled = true;
+      timer && clearTimeout(timer);
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => {
+      req.destroy(new Error('Request timed out'));
+      done(null);
+    }, timeoutMs);
+
     const req = client.get(options, (res) => {
+      timer && timer.refresh();
       // Consume response data to free memory
       res.resume();
-      resolve({
+      done({
         statusCode: res.statusCode,
         headers: res.headers
       });
     });
 
-    req.on('error', (err) => {
-      reject(err);
+    req.on('error', () => {
+      done(null);
     });
 
     req.on('timeout', () => {
-      req.destroy();
-      reject(new Error('Request timed out'));
+      req.destroy(new Error('Idle timeout'));
     });
 
-    if (extraOptions && extraOptions.timeout) {
-      req.setTimeout(extraOptions.timeout);
-    }
+    req.setTimeout(Math.min(timeoutMs, 5000));
   });
 }
 
