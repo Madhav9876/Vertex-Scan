@@ -3,7 +3,7 @@ const express = require('express');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const db = require('../db/connection');
-const { generateToken, generateApiKey, authenticateToken, revokeUserTokens } = require('../middleware/auth');
+const { generateToken, generateRefreshToken, generateApiKey, authenticateToken, verifyRefreshToken, revokeUserTokens } = require('../middleware/auth');
 const { authLimiter, passwordResetLimiter } = require('../middleware/rateLimit');
 const { isValidEmail, isValidPassword } = require('../utils/validation');
 const { logSecurityEvent } = require('../middleware/security');
@@ -13,6 +13,23 @@ const MAX_LOGIN_FAILURES = 10;
 const LOCKOUT_WINDOW_MINUTES = 15;
 const RESET_TOKEN_BYTES = 32;
 const RESET_TOKEN_TTL_MINUTES = Number(process.env.PASSWORD_RESET_TTL_MINUTES || 30);
+
+// Set the httpOnly refresh-token cookie. Works across the Vite dev proxy
+// (same-origin /api) and in production.
+function setRefreshCookie(res, token) {
+  const isProd = process.env.NODE_ENV === 'production';
+  res.cookie('vs_refresh', token, {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: isProd ? 'none' : 'lax',
+    path: '/api',
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+  });
+}
+
+function clearRefreshCookie(res) {
+  res.clearCookie('vs_refresh', { path: '/api', httpOnly: true });
+}
 
 // Count recent failed logins for an email (brute-force / anomaly detection)
 async function recentFailureCount(email) {
@@ -66,6 +83,8 @@ router.post('/register', authLimiter, async (req, res) => {
 
     const user = result.rows[0];
     const token = generateToken(user);
+    const refreshToken = generateRefreshToken(user);
+    setRefreshCookie(res, refreshToken);
 
     await logSecurityEvent('register_success', { ip: req.clientIp, email: normalizedEmail, user_id: user.id });
 
@@ -166,6 +185,8 @@ router.post('/login', authLimiter, async (req, res) => {
     await logSecurityEvent('login_success', { ip: req.clientIp, email: normalizedEmail, user_id: user.id });
 
     const token = generateToken(user);
+    const refreshToken = generateRefreshToken(user);
+    setRefreshCookie(res, refreshToken);
 
     res.json({
       message: 'Login successful',
@@ -303,11 +324,68 @@ router.get('/me', authenticateToken, async (req, res) => {
 router.post('/logout', authenticateToken, async (req, res) => {
   try {
     await revokeUserTokens(req.user.id);
+    clearRefreshCookie(res);
     await logSecurityEvent('logout', { ip: req.clientIp, user_id: req.user.id });
     res.json({ message: 'Logged out successfully' });
   } catch (err) {
     console.error('Logout error:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/refresh — exchange a valid refresh cookie for a new access token.
+// Used by the frontend automatically when the short-lived access token expires,
+// so users stay signed in without re-entering credentials.
+router.post('/refresh', async (req, res) => {
+  try {
+    const cookieHeader = req.headers.cookie || '';
+    const match = cookieHeader.match(/(?:^|;\s*)vs_refresh=([^;]+)/);
+    const refreshToken = match ? decodeURIComponent(match[1]) : null;
+
+    if (!refreshToken) {
+      return res.status(401).json({ error: 'No refresh token. Please log in again.' });
+    }
+
+    let decoded;
+    try {
+      decoded = verifyRefreshToken(refreshToken);
+    } catch (err) {
+      return res.status(401).json({ error: 'Invalid or expired session. Please log in again.' });
+    }
+
+    // Confirm the user still exists and the token hasn't been revoked.
+    const result = await db.query(
+      'SELECT id, email, full_name, role, is_active, token_version FROM users WHERE id = $1 AND is_active = true',
+      [decoded.id]
+    );
+    if (result.rows.length === 0) {
+      clearRefreshCookie(res);
+      return res.status(401).json({ error: 'User not found or inactive' });
+    }
+
+    const expectedJti = `${result.rows[0].id}:${result.rows[0].token_version}`;
+    if (decoded.jti !== expectedJti) {
+      clearRefreshCookie(res);
+      return res.status(401).json({ error: 'Session revoked. Please log in again.' });
+    }
+
+    const user = result.rows[0];
+    const newToken = generateToken(user);
+    const newRefresh = generateRefreshToken(user);
+    setRefreshCookie(res, newRefresh);
+
+    res.json({
+      token: newToken,
+      user: {
+        id: user.id,
+        email: user.email,
+        full_name: user.full_name,
+        role: user.role,
+      },
+    });
+  } catch (err) {
+    console.error('Refresh error:', err);
+    res.status(500).json({ error: 'Unable to refresh session. Please log in again.' });
   }
 });
 

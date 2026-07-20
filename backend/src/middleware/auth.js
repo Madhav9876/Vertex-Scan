@@ -8,9 +8,13 @@ if (!JWT_SECRET) {
   console.error('FATAL: JWT_SECRET environment variable is not set. Refusing to start with a weak default.');
   process.exit(1);
 }
+// Dedicated secret for refresh tokens (falls back to the access secret if unset).
+const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || JWT_SECRET;
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '15m';
+const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
 const JWT_ISSUER = process.env.JWT_ISSUER || 'vertex-scan';
 const JWT_AUDIENCE = process.env.JWT_AUDIENCE || 'vertex-scan-client';
+const JWT_REFRESH_ISSUER = `${JWT_ISSUER}-refresh`;
 
 function generateToken(user) {
   const version = user.token_version != null ? user.token_version : 0;
@@ -25,6 +29,24 @@ function generateToken(user) {
     {
       expiresIn: JWT_EXPIRES_IN,
       issuer: JWT_ISSUER,
+      audience: JWT_AUDIENCE,
+    }
+  );
+}
+
+function generateRefreshToken(user) {
+  const version = user.token_version != null ? user.token_version : 0;
+  return jwt.sign(
+    {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      jti: `${user.id}:${version}`,
+    },
+    JWT_REFRESH_SECRET,
+    {
+      expiresIn: JWT_REFRESH_EXPIRES_IN,
+      issuer: JWT_REFRESH_ISSUER,
       audience: JWT_AUDIENCE,
     }
   );
@@ -90,6 +112,15 @@ async function revokeUserTokens(userId) {
   await db.query('UPDATE users SET token_version = COALESCE(token_version, 0) + 1 WHERE id = $1', [userId]);
 }
 
+// Validate a refresh token (stateless, same token_version revocation check).
+// Returns the decoded payload or throws. Does NOT set req.user.
+function verifyRefreshToken(token) {
+  return jwt.verify(token, JWT_REFRESH_SECRET, {
+    issuer: JWT_REFRESH_ISSUER,
+    audience: JWT_AUDIENCE,
+  });
+}
+
 function requireRole(...roles) {
   return (req, res, next) => {
     if (!req.user || !roles.includes(req.user.role)) {
@@ -101,8 +132,10 @@ function requireRole(...roles) {
 
 module.exports = {
   generateToken,
+  generateRefreshToken,
   generateApiKey,
   authenticateToken,
+  verifyRefreshToken,
   requireRole,
   revokeUserTokens,
   JWT_SECRET,
