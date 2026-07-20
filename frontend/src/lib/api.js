@@ -38,10 +38,18 @@ api.interceptors.response.use(
   async (error) => {
     const originalRequest = error.config;
 
-    // Avoid looping on the refresh call itself or repeated 401s.
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    // The backend returns 403 (not 401) for an expired/invalid access token.
+    // Treat both as refreshable so the user stays signed in during a scan.
+    const status = error.response?.status;
+    const isTokenError =
+      status === 401 ||
+      (status === 403 &&
+        /invalid or expired token|token revoked|not authenticated/i.test(error.response?.data?.error || ''));
+
+    if (isTokenError && !originalRequest._retry) {
       if (originalRequest.url?.includes('/auth/refresh') || originalRequest.url?.includes('/auth/login')) {
         localStorage.removeItem('token');
+        localStorage.removeItem('refresh_token');
         localStorage.removeItem('user');
         window.location.href = '/login';
         return Promise.reject(error);
@@ -61,9 +69,13 @@ api.interceptors.response.use(
       isRefreshing = true;
 
       try {
-        const res = await api.post('/auth/refresh');
+        // Send the stored refresh token as a fallback (covers cross-origin prod
+        // where the httpOnly cookie may not be delivered).
+        const storedRefresh = localStorage.getItem('refresh_token');
+        const res = await api.post('/auth/refresh', storedRefresh ? { refresh_token: storedRefresh } : undefined);
         const newToken = res.data.token;
         localStorage.setItem('token', newToken);
+        if (res.data.refresh_token) localStorage.setItem('refresh_token', res.data.refresh_token);
         if (res.data.user) {
           localStorage.setItem('user', JSON.stringify(res.data.user));
         }
@@ -73,6 +85,7 @@ api.interceptors.response.use(
         return api(originalRequest);
       } catch (refreshErr) {
         localStorage.removeItem('token');
+        localStorage.removeItem('refresh_token');
         localStorage.removeItem('user');
         window.location.href = '/login';
         return Promise.reject(refreshErr);

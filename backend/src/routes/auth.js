@@ -96,7 +96,8 @@ router.post('/register', authLimiter, async (req, res) => {
         full_name: user.full_name,
         role: user.role
       },
-      token
+      token,
+      refresh_token: refreshToken,
     });
   } catch (err) {
     console.error('Registration error:', err);
@@ -196,7 +197,8 @@ router.post('/login', authLimiter, async (req, res) => {
         full_name: user.full_name,
         role: user.role
       },
-      token
+      token,
+      refresh_token: refreshToken,
     });
   } catch (err) {
     console.error('Login error:', err);
@@ -338,9 +340,12 @@ router.post('/logout', authenticateToken, async (req, res) => {
 // so users stay signed in without re-entering credentials.
 router.post('/refresh', async (req, res) => {
   try {
+    // Prefer the httpOnly cookie, but fall back to a body/header refresh token
+    // so the flow also works when cookies are blocked (e.g. cross-origin prod).
     const cookieHeader = req.headers.cookie || '';
     const match = cookieHeader.match(/(?:^|;\s*)vs_refresh=([^;]+)/);
-    const refreshToken = match ? decodeURIComponent(match[1]) : null;
+    const cookieToken = match ? decodeURIComponent(match[1]) : null;
+    const refreshToken = cookieToken || req.body?.refresh_token || req.headers['x-refresh-token'] || null;
 
     if (!refreshToken) {
       return res.status(401).json({ error: 'No refresh token. Please log in again.' });

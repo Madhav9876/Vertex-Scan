@@ -23,6 +23,7 @@ export default function Login() {
     try {
       const res = await authAPI.login({ email, password });
       localStorage.setItem('token', res.data.token);
+      if (res.data.refresh_token) localStorage.setItem('refresh_token', res.data.refresh_token);
       localStorage.setItem('user', JSON.stringify(res.data.user));
       navigate('/dashboard');
     } catch (err) {
@@ -39,6 +40,7 @@ export default function Login() {
     try {
       const res = await authAPI.googleLogin(credentialResponse.credential);
       localStorage.setItem('token', res.data.token);
+      if (res.data.refresh_token) localStorage.setItem('refresh_token', res.data.refresh_token);
       localStorage.setItem('user', JSON.stringify(res.data.user));
       navigate('/dashboard');
     } catch (err) {
