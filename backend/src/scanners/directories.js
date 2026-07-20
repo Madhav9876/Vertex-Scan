@@ -1,11 +1,8 @@
 // Vertex Scan - Directory Scanner
 // Discovers exposed directories, files, and sensitive endpoints
-// v2.0 - Uses fingerprint data for targeted CMS-specific path discovery
+// v2.0 - Uses fingerprint data for targeted CMS-specific path discovery + pinned requests
 
-const https = require('https');
-const http = require('http');
-const url = require('url');
-const { buildPinnedUrl, applyPinnedTarget } = require('../utils/validation');
+const { pinnedHead } = require('../utils/request');
 
 const COMMON_PATHS = [
   // Admin panels
@@ -223,10 +220,7 @@ const SEVERITY_DESCRIPTIONS = {
 
 async function scanDirectories(target, fingerprint) {
   const findings = [];
-  const normalized = typeof target === 'string' ? target : target.normalized;
-  const baseUrl = normalized.startsWith('http') ? normalized : `https://${normalized}`;
-  const parsed = new URL(baseUrl);
-  const baseHost = `${parsed.protocol}//${parsed.host}`;
+  const baseHost = target.normalized || (typeof target === 'string' ? target : target.normalized);
 
   // Build path list: start with common paths, then augment with fingerprint data
   let paths = [...COMMON_PATHS];
@@ -259,7 +253,7 @@ async function scanDirectories(target, fingerprint) {
   for (let i = 0; i < paths.length; i += batchSize) {
     const batch = paths.slice(i, i + batchSize);
     const promises = batch.map(pathConfig =>
-      checkPath(baseHost, pathConfig, target)
+      checkPath(target, pathConfig)
         .then(result => {
           if (result) {
             findings.push(result);
@@ -294,30 +288,28 @@ async function scanDirectories(target, fingerprint) {
   return findings;
 }
 
-async function checkPath(baseUrl, pathConfig, target) {
-  const url = `${baseUrl}${pathConfig.path}`;
-
+async function checkPath(target, pathConfig) {
   try {
-    const { statusCode, headers } = await fetchUrl(url, target);
+    const result = await pinnedHead(target, pathConfig.path, { timeout: 5000 });
     
-    if (statusCode && statusCode >= 200 && statusCode < 400) {
+    if (result && result.statusCode >= 200 && result.statusCode < 400) {
       const severityInfo = SEVERITY_DESCRIPTIONS[pathConfig.severity] || SEVERITY_DESCRIPTIONS.medium;
-      const contentLength = headers['content-length'] || 'unknown';
+      const contentLength = result.headers['content-length'] || 'unknown';
       
       return {
         category: 'directories',
         severity: pathConfig.severity,
         title: `Exposed ${pathConfig.category.toUpperCase()}: ${pathConfig.path}`,
-        description: `Found accessible path: ${pathConfig.path} (HTTP ${statusCode}). This is a ${pathConfig.category} endpoint.`,
+        description: `Found accessible path: ${pathConfig.path} (HTTP ${result.statusCode}). This is a ${pathConfig.category} endpoint.`,
         impact: severityInfo.impact,
         remediation: severityInfo.remediation,
-        current_value: `HTTP ${statusCode} - ${pathConfig.path} is publicly accessible`,
+        current_value: `HTTP ${result.statusCode} - ${pathConfig.path} is publicly accessible`,
         recommended_value: `HTTP 403/404 - ${pathConfig.path} should not be publicly accessible`,
         cwe_id: pathConfig.severity === 'critical' ? 'CWE-538' : 'CWE-200',
-        confidence: statusCode < 300 ? 'high' : 'medium',
+        confidence: result.statusCode < 300 ? 'high' : 'medium',
         metadata: {
-          url: url,
-          status_code: statusCode,
+          path: pathConfig.path,
+          status_code: result.statusCode,
           content_length: contentLength,
           category: pathConfig.category
         }
@@ -328,42 +320,6 @@ async function checkPath(baseUrl, pathConfig, target) {
   }
   
   return null;
-}
-
-function fetchUrl(urlStr, target) {
-  return new Promise((resolve, reject) => {
-    const isHttps = urlStr.startsWith('https');
-    const client = isHttps ? https : http;
-
-    const options = {
-      timeout: 5000,
-      headers: {
-        'User-Agent': 'Vertex-Scan/2.0 (Security Scanner)',
-        'Accept': '*/*'
-      }
-    };
-    if (target && target.resolvedAddress) {
-      applyPinnedTarget(options, target);
-      urlStr = buildPinnedUrl(target, isHttps ? 'https:' : 'http:');
-    }
-
-    const req = client.get(urlStr, options, (res) => {
-      res.resume();
-      resolve({
-        statusCode: res.statusCode,
-        headers: res.headers
-      });
-    });
-    
-    req.on('error', (err) => {
-      reject(err);
-    });
-    
-    req.on('timeout', () => {
-      req.destroy();
-      reject(new Error('Timeout'));
-    });
-  });
 }
 
 module.exports = { scanDirectories };

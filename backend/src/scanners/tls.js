@@ -1,22 +1,19 @@
 // Vertex Scan - TLS/SSL Scanner
 // Analyzes TLS configuration, certificate validity, and protocol support
+// v2.0 - Uses pinned request utility for proper Host header handling
 
-const https = require('https');
 const tls = require('tls');
-const url = require('url');
-const { buildPinnedUrl, applyPinnedTarget } = require('../utils/validation');
+const https = require('https');
+const { pinnedGet } = require('../utils/request');
 
 async function scanTLS(target) {
   const findings = [];
-  const normalized = typeof target === 'string' ? target : target.normalized;
-  const parsedUrl = new URL(normalized.startsWith('http') ? normalized : `https://${normalized}`);
-  // Pinned, SSRF-vetted address (falls back to parsed hostname if no pin present).
-  const hostname = (target && target.resolvedAddress) || parsedUrl.hostname;
-  const port = (target && target.port) || parsedUrl.port || 443;
+  const hostname = (target && target.hostname) || new URL(target.normalized).hostname;
+  const port = (target && target.port) || 443;
 
   // Check if HTTPS is supported
   try {
-    const httpsSupported = await checkHTTPS(hostname, port);
+    const httpsSupported = await checkHTTPS(target);
     
     if (!httpsSupported) {
       findings.push({
@@ -35,7 +32,7 @@ async function scanTLS(target) {
     }
 
     // Get certificate details
-    const certInfo = await getCertificateInfo(hostname, port, target && target.hostname);
+    const certInfo = await getCertificateInfo(target);
 
     if (!certInfo) {
       findings.push({
@@ -181,7 +178,7 @@ async function scanTLS(target) {
     }
 
     // Check TLS protocol versions
-    const protocolVersions = await checkTLSProtocols(hostname, port);
+    const protocolVersions = await checkTLSProtocols(target);
     
     if (protocolVersions.tlsv1_0) {
       findings.push({
@@ -241,22 +238,26 @@ async function scanTLS(target) {
       });
     }
 
-    // Check for HSTS
-    const headers = await fetchHTTPSHeaders(hostname, port, target);
-    if (headers) {
-      const hstsHeader = headers['strict-transport-security'] || headers['Strict-Transport-Security'];
-      if (hstsHeader) {
-        findings.push({
-          category: 'tls',
-          severity: 'info',
-          title: 'HSTS Implemented',
-          description: `${hostname} implements HTTP Strict Transport Security (HSTS).`,
-          impact: 'Browsers will enforce HTTPS connections, preventing downgrade attacks.',
-          current_value: hstsHeader,
-          recommended_value: 'HSTS configured correctly',
-          confidence: 'high'
-        });
+    // Check for HSTS (using pinnedGet for proper Host header)
+    try {
+      const hstsResult = await pinnedGet(target, '/', { timeout: 8000, maxBodySize: 1024 });
+      if (hstsResult && hstsResult.headers) {
+        const hstsHeader = hstsResult.headers['strict-transport-security'] || hstsResult.headers['Strict-Transport-Security'];
+        if (hstsHeader) {
+          findings.push({
+            category: 'tls',
+            severity: 'info',
+            title: 'HSTS Implemented',
+            description: `${hostname} implements HTTP Strict Transport Security (HSTS).`,
+            impact: 'Browsers will enforce HTTPS connections, preventing downgrade attacks.',
+            current_value: hstsHeader,
+            recommended_value: 'HSTS configured correctly',
+            confidence: 'high'
+          });
+        }
       }
+    } catch (e) {
+      // HSTS check failed, skip
     }
 
   } catch (err) {
@@ -276,15 +277,24 @@ async function scanTLS(target) {
   return findings;
 }
 
-function checkHTTPS(hostname, port) {
+function checkHTTPS(target) {
   return new Promise((resolve) => {
     const options = {
-      timeout: 8000,
+      hostname: target.resolvedAddress,
+      host: target.resolvedAddress,
+      port: target.port || 443,
+      path: '/',
+      method: 'GET',
       rejectUnauthorized: false,
-      headers: { 'User-Agent': 'Vertex-Scan/1.0' }
+      servername: target.hostname,
+      timeout: 8000,
+      headers: {
+        'Host': target.hostname,
+        'User-Agent': 'Vertex-Scan/1.0'
+      }
     };
-    applyPinnedTarget(options, { resolvedAddress: hostname, port, family: hostname.includes(':') ? 6 : 4, hostname: hostname });
-    const req = https.get(buildPinnedUrl({ normalized: `https://${hostname}:${port}`, resolvedAddress: hostname, port }, 'https:'), options, (res) => {
+
+    const req = https.get(options, (res) => {
       res.resume();
       resolve(true);
     });
@@ -296,8 +306,12 @@ function checkHTTPS(hostname, port) {
   });
 }
 
-function getCertificateInfo(hostname, port, sniHostname) {
+function getCertificateInfo(target) {
   return new Promise((resolve) => {
+    const hostname = target.resolvedAddress;
+    const port = target.port || 443;
+    const sniHostname = target.hostname;
+
     const socket = tls.connect({
       host: hostname,
       port: port,
@@ -347,7 +361,7 @@ function getCertificateInfo(hostname, port, sniHostname) {
   });
 }
 
-function checkTLSProtocols(hostname, port) {
+function checkTLSProtocols(target) {
   const protocols = {
     tlsv1_0: false,
     tlsv1_1: false,
@@ -355,22 +369,26 @@ function checkTLSProtocols(hostname, port) {
     tlsv1_3: false
   };
 
+  const hostname = target.resolvedAddress;
+  const port = target.port || 443;
+  const sniHostname = target.hostname;
+
   return new Promise((resolve) => {
     const versions = [
-      { name: 'tlsv1_0', secureProtocol: 'TLSv1_method', min: 'TLSv1', max: 'TLSv1' },
-      { name: 'tlsv1_1', secureProtocol: 'TLSv1_1_method', min: 'TLSv1.1', max: 'TLSv1.1' },
-      { name: 'tlsv1_2', secureProtocol: 'TLSv1_2_method', min: 'TLSv1.2', max: 'TLSv1.2' },
+      { name: 'tlsv1_0', min: 'TLSv1', max: 'TLSv1' },
+      { name: 'tlsv1_1', min: 'TLSv1.1', max: 'TLSv1.1' },
+      { name: 'tlsv1_2', min: 'TLSv1.2', max: 'TLSv1.2' },
     ];
 
     let completed = 0;
-    const total = versions.length;
+    const total = versions.length + 1; // +1 for TLS 1.3
 
     versions.forEach(ver => {
       try {
         const socket = tls.connect({
           host: hostname,
           port: port,
-          servername: hostname,
+          servername: sniHostname,
           rejectUnauthorized: false,
           minVersion: ver.min,
           maxVersion: ver.max,
@@ -391,53 +409,36 @@ function checkTLSProtocols(hostname, port) {
       }
     });
 
-    // Check TLS 1.3 separately via https connection
-    const tls13Socket = tls.connect({
-      host: hostname,
-      port: port,
-      servername: hostname,
-      rejectUnauthorized: false,
-      minVersion: 'TLSv1.3',
-      maxVersion: 'TLSv1.3',
-      timeout: 3000
-    }, () => {
-      protocols.tlsv1_3 = true;
-      tls13Socket.end();
+    // Check TLS 1.3 separately
+    try {
+      const tls13Socket = tls.connect({
+        host: hostname,
+        port: port,
+        servername: sniHostname,
+        rejectUnauthorized: false,
+        minVersion: 'TLSv1.3',
+        maxVersion: 'TLSv1.3',
+        timeout: 3000
+      }, () => {
+        protocols.tlsv1_3 = true;
+        tls13Socket.end();
+        checkDone();
+      });
+      tls13Socket.on('error', () => checkDone());
+      tls13Socket.on('timeout', () => {
+        tls13Socket.destroy();
+        checkDone();
+      });
+    } catch (e) {
       checkDone();
-    });
-    tls13Socket.on('error', () => checkDone());
-    tls13Socket.on('timeout', () => {
-      tls13Socket.destroy();
-      checkDone();
-    });
+    }
 
     function checkDone() {
       completed++;
-      if (completed >= total + 1) {
+      if (completed >= total) {
         resolve(protocols);
       }
     }
-  });
-}
-
-function fetchHTTPSHeaders(hostname, port, pin) {
-  return new Promise((resolve) => {
-    const options = {
-      timeout: 8000,
-      rejectUnauthorized: false,
-      headers: { 'User-Agent': 'Vertex-Scan/1.0' }
-    };
-    const pinTarget = pin || { resolvedAddress: hostname, port, family: hostname.includes(':') ? 6 : 4, hostname };
-    applyPinnedTarget(options, pinTarget);
-    const req = https.get(buildPinnedUrl({ normalized: `https://${hostname}:${port}/`, resolvedAddress: hostname, port }, 'https:'), options, (res) => {
-      res.resume();
-      resolve(res.headers);
-    });
-    req.on('error', () => resolve(null));
-    req.on('timeout', () => {
-      req.destroy();
-      resolve(null);
-    });
   });
 }
 

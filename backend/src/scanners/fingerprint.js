@@ -2,10 +2,7 @@
 // Identifies CMS platforms, web servers, frameworks, and hosting providers
 // Enables targeted deep-scanning based on detected technologies
 
-const https = require('https');
-const http = require('http');
-const url = require('url');
-const { buildPinnedUrl, applyPinnedTarget } = require('../utils/validation');
+const { pinnedGet } = require('../utils/request');
 
 // CMS detection signatures
 const CMS_SIGNATURES = [
@@ -598,98 +595,35 @@ async function checkPathExists(baseHost, path, target) {
   }
 }
 
-function fetchPageData(baseHost, target) {
-  return new Promise((resolve) => {
-    const options = {
+async function fetchPageData(baseHost, target) {
+  try {
+    const result = await pinnedGet(target, '/', {
       timeout: 10000,
+      maxBodySize: 512 * 1024,
       headers: {
-        'User-Agent': 'Vertex-Scan/2.0 (Security Scanner; +https://vertexscan.io)',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5'
-      },
-      rejectUnauthorized: false
-    };
-
-    if (target && target.resolvedAddress) {
-      applyPinnedTarget(options, target);
-    }
-
-    const urlToFetch = target && target.resolvedAddress
-      ? buildPinnedUrl(target, 'https:')
-      : `${baseHost}/`;
-
-    const client = urlToFetch.startsWith('https') ? https : http;
-    const req = client.get(urlToFetch, options, (res) => {
-      let body = '';
-      const maxBodySize = 512 * 1024; // 512KB limit
-      let bodySize = 0;
-
-      res.on('data', (chunk) => {
-        bodySize += chunk.length;
-        if (bodySize <= maxBodySize) {
-          body += chunk.toString('utf8');
-        }
-      });
-
-      res.on('end', () => {
-        // Parse cookies from set-cookie header
-        const cookies = res.headers['set-cookie'] || [];
-
-        resolve({
-          headers: res.headers,
-          body,
-          statusCode: res.statusCode,
-          cookies
-        });
-      });
+      }
     });
-
-    req.on('error', () => resolve(null));
-    req.on('timeout', () => {
-      req.destroy();
-      resolve(null);
-    });
-  });
+    return result;
+  } catch (e) {
+    return null;
+  }
 }
 
-function fetchUrlData(urlStr, target) {
-  return new Promise((resolve) => {
-    const isHttps = urlStr.startsWith('https');
-    const client = isHttps ? https : http;
-
-    const options = {
+async function fetchUrlData(urlStr, target) {
+  // Parse the path from urlStr for use with pinnedGet
+  try {
+    const parsed = new URL(urlStr);
+    const path = parsed.pathname + parsed.search;
+    const result = await pinnedGet(target, path, {
       timeout: 5000,
-      headers: {
-        'User-Agent': 'Vertex-Scan/2.0 (Security Scanner)',
-        'Accept': '*/*'
-      },
-      rejectUnauthorized: false
-    };
-
-    if (target && target.resolvedAddress) {
-      applyPinnedTarget(options, target);
-    }
-
-    const req = client.get(urlStr, options, (res) => {
-      let body = '';
-      res.on('data', (chunk) => {
-        body += chunk.toString('utf8').substring(0, 50000); // Limit per-file
-      });
-      res.on('end', () => {
-        resolve({
-          statusCode: res.statusCode,
-          headers: res.headers,
-          body
-        });
-      });
+      maxBodySize: 50000
     });
-
-    req.on('error', () => resolve(null));
-    req.on('timeout', () => {
-      req.destroy();
-      resolve(null);
-    });
-  });
+    return result;
+  } catch (e) {
+    return null;
+  }
 }
 
 module.exports = { fingerprintTarget };

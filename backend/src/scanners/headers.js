@@ -1,10 +1,8 @@
 // Vertex Scan - Security Headers Scanner
 // Analyzes HTTP security headers based on OWASP recommendations
+// v2.0 - Uses pinned request utility to preserve Host header for multi-tenant IPs
 
-const https = require('https');
-const http = require('http');
-const url = require('url');
-const { buildPinnedUrl, applyPinnedTarget } = require('../utils/validation');
+const { pinnedGet } = require('../utils/request');
 
 const SECURITY_HEADERS = {
   'strict-transport-security': {
@@ -132,21 +130,20 @@ const SECURITY_HEADERS = {
 
 async function scanHeaders(target) {
   const findings = [];
-  const parsedUrl = url.parse(typeof target === 'string' ? target : target.normalized);
-
-  // Use a pinned, SSRF-vetted connection target to avoid DNS-rebind bypasses.
-  const urlToScan = buildPinnedUrl(target, 'https:');
-  const parsed = new URL(urlToScan);
+  const targetUrl = typeof target === 'string' ? target : target.normalized;
 
   try {
-    const headers = await fetchHeaders(parsed.toString(), target);
+    const result = await pinnedGet(target, '/', {
+      timeout: 10000,
+      maxBodySize: 10240 // Just need headers, minimal body
+    });
     
-    if (!headers) {
+    if (!result || !result.headers) {
       findings.push({
         category: 'headers',
         severity: 'high',
         title: 'Unable to Retrieve Headers',
-        description: `Could not retrieve HTTP headers from ${parsed.toString()}. The server may be unreachable or not responding.`,
+        description: `Could not retrieve HTTP headers from ${targetUrl}. The server may be unreachable or not responding.`,
         impact: 'Unable to assess HTTP security header configuration.',
         remediation: 'Verify the target URL is accessible and resolves correctly.',
         current_value: 'No response',
@@ -157,11 +154,11 @@ async function scanHeaders(target) {
       return findings;
     }
 
+    const headers = result.headers;
+
     // Check each security header
-    const headerKeys = Object.keys(headers).map(k => k.toLowerCase());
-    
     for (const [headerName, config] of Object.entries(SECURITY_HEADERS)) {
-      const found = headers[headerName] || headers[headerName.toLowerCase()];
+      const found = getHeader(headers, headerName);
       
       if (!found) {
         findings.push({
@@ -185,8 +182,8 @@ async function scanHeaders(target) {
     }
 
     // Check for information disclosure
-    const serverHeader = headers['server'];
-    if (serverHeader && serverHeader.length > 0) {
+    const serverHeader = getHeader(headers, 'server');
+    if (serverHeader) {
       findings.push({
         category: 'headers',
         severity: 'low',
@@ -206,7 +203,7 @@ async function scanHeaders(target) {
       });
     }
 
-    const poweredBy = headers['x-powered-by'];
+    const poweredBy = getHeader(headers, 'x-powered-by');
     if (poweredBy) {
       findings.push({
         category: 'headers',
@@ -239,35 +236,16 @@ async function scanHeaders(target) {
   return findings;
 }
 
-function fetchHeaders(urlStr, target) {
-  return new Promise((resolve, reject) => {
-    const isHttps = urlStr.startsWith('https');
-    const client = isHttps ? https : http;
-
-    const options = {
-      timeout: 10000,
-      headers: {
-        'User-Agent': 'Vertex-Scan/1.0 (Security Scanner)',
-        'Accept': '*/*'
-      }
-    };
-    applyPinnedTarget(options, target);
-
-    const req = client.get(urlStr, options, (res) => {
-      // Consume response data to free up memory
-      res.resume();
-      resolve(res.headers);
-    });
-    
-    req.on('error', (err) => {
-      reject(err);
-    });
-    
-    req.on('timeout', () => {
-      req.destroy();
-      reject(new Error('Request timed out'));
-    });
-  });
+// Case-insensitive header lookup
+function getHeader(headers, name) {
+  if (!headers) return null;
+  const lower = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === lower) {
+      return headers[key];
+    }
+  }
+  return null;
 }
 
 function analyzeHeaderValue(headerName, value, config) {
@@ -327,7 +305,7 @@ function analyzeHeaderValue(headerName, value, config) {
   }
 
   if (headerName === 'access-control-allow-origin') {
-    if (value === '*' || value === '*') {
+    if (String(value).trim() === '*') {
       findings.push({
         category: 'headers',
         severity: 'high',
