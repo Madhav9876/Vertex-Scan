@@ -19,7 +19,16 @@ const SEVERITY_WEIGHTS = {
 };
 
 const MAX_SCORE = 100;
-const CONFIDENCE_MODIFIERS = { high: 1.0, medium: 0.7, low: 0.4 };
+const CONFIDENCE_MODIFIERS = { high: 1.0, medium: 0.6, low: 0.2 };
+
+// Weight applied to "recommendation" findings (best-practice hardening gaps and
+// low-confidence heuristics). These are NOT exploitable vulnerabilities, so they
+// must not dominate the score the way a real vuln does.
+const RECOMMENDATION_WEIGHT = 0.25;
+
+// How aggressively real vulnerability penalty grows. Higher = more forgiving,
+// prevents a single issue from nuking the score to F (diminishing returns).
+const VULN_SOFTENING = 38;
 
 const SCAN_HARD_TIMEOUT_MS = parseInt(process.env.SCAN_HARD_TIMEOUT_MS, 10) || 120000;
 
@@ -324,150 +333,177 @@ async function runModule(moduleType, scanId, target, allFindings, fingerprint) {
 }
 
 /**
- * Enhanced grade calculation with:
- * - Per-module score breakdown
- * - Confidence-weighted deductions
- * - Vulnerability density analysis
- * - Penalty for duplicate/redundant findings
- * - Technology-specific risk adjustments
+ * Risk-proportionate grade calculation.
+ *
+ * Key principle: distinguish EXPLOITABLE VULNERABILITIES from BEST-PRACTICE
+ * RECOMMENDATIONS.
+ *   - A vulnerability (exposed .env, HTTPS downgrade, expired cert, weak TLS,
+ *     critical CVE) is penalised fully and drives the grade down.
+ *   - A recommendation (missing security header, missing cookie flag, missing
+ *     security.txt, low-confidence heuristic guess) is a hardening gap, not a
+ *     breach. It is penalised only lightly and never triggers the harsh flat
+ *     severity deductions.
+ *
+ * Penalties use diminishing returns so a single issue cannot crater a site to F,
+ * and genuine good posture (HSTS, TLS 1.3, HTTPS) is rewarded, producing
+ * realistic, differentiating scores.
  */
+function isRecommendation(finding) {
+  if (finding.severity === 'info') return true;
+  // Low-confidence heuristics (reflected-XSS probe, open-redirect probe, generic
+  // CSRF guess, etc.) are guesses, not confirmed issues.
+  if (finding.confidence === 'low') return true;
+  const t = String(finding.title || '').toLowerCase();
+  // "Missing <header>", "Cookie X Missing ...", "No Exposed Directories" etc.
+  if (t.includes('missing') || t.startsWith('no ')) return true;
+  return false;
+}
+
 function calculateEnhancedGrade(findings, fingerprint) {
-  if (findings.length === 0) {
-    return {
-      score: 100,
-      grade: 'A+',
-      scoreBreakdown: {
-        overall: 100,
-        weightedScore: 100,
-        vulnerabilityDensity: 0,
-        penalty: 0,
-        bySeverity: { critical: 0, high: 0, medium: 0, low: 0, info: 0 },
-        byModule: {},
-        confidenceAdjusted: true,
-        deepScanEnabled: true
-      }
-    };
+  const emptyBreakdown = {
+    overall: 100,
+    weightedScore: 100,
+    penalty: 0,
+    vulnerabilityDensity: 0,
+    redundantPenalty: 0,
+    uniqueVulnerabilityBonus: 0,
+    bySeverity: { critical: 0, high: 0, medium: 0, low: 0, info: 0 },
+    byModule: {},
+    vulnerabilities: 0,
+    recommendations: 0,
+    confidenceAdjusted: true,
+    deepScanEnabled: true
+  };
+
+  if (!findings || findings.length === 0) {
+    return { score: 100, grade: 'A+', scoreBreakdown: emptyBreakdown };
   }
 
-  // Group findings by module for per-module scoring
   const byModule = {};
   const bySeverity = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
-  let totalWeightedPenalty = 0;
+  let vulnerabilityPenalty = 0;   // full weight, drives grade
+  let recommendationPenalty = 0;  // light weight, hardening gaps
   let uniqueVulnerabilityBonus = 0;
   let redundantPenalty = 0;
+  let postureBonus = 0;
+  let vulnCount = 0;
+  let recCount = 0;
+  let confirmedCritical = 0;
+  let confirmedHigh = 0;
 
-  // Track duplicate titles to penalize redundant findings
   const titleCounts = {};
+  const positiveSignals = [
+    'hsts implemented', 'tls 1.3 supported', 'strong certificate key',
+    'https supported'
+  ];
 
   for (const finding of findings) {
-    // Track module-level data
     const mod = finding.category || 'unknown';
     if (!byModule[mod]) byModule[mod] = [];
     byModule[mod].push(finding);
 
-    // Track severity counts
     bySeverity[finding.severity] = (bySeverity[finding.severity] || 0) + 1;
 
-    // Confidence-weighted penalty
     const weight = SEVERITY_WEIGHTS[finding.severity] || 0;
-    const confidenceMod = CONFIDENCE_MODIFIERS[finding.confidence] || 0.7;
-    totalWeightedPenalty += weight * confidenceMod;
+    const confMod = CONFIDENCE_MODIFIERS[finding.confidence] || 0.2;
+    const eff = weight * confMod;
 
-    // Track unique vulnerability signatures for bonus
-    if (finding.isUniqueVulnerability) {
-      uniqueVulnerabilityBonus += 3;
+    const isRec = isRecommendation(finding);
+    if (isRec) {
+      recCount++;
+      recommendationPenalty += eff * RECOMMENDATION_WEIGHT;
+    } else {
+      vulnCount++;
+      vulnerabilityPenalty += eff;
+      // Track confirmed (medium+ confidence) vulns for the modest flat deduction.
+      if (finding.severity === 'critical' && finding.confidence !== 'low') confirmedCritical++;
+      if (finding.severity === 'high' && finding.confidence !== 'low') confirmedHigh++;
     }
 
-    // Penalize redundant findings (same title appearing multiple times)
+    if (finding.isUniqueVulnerability) uniqueVulnerabilityBonus += 2;
+
     const key = finding.title || '';
     titleCounts[key] = (titleCounts[key] || 0) + 1;
-    if (titleCounts[key] > 1) {
-      redundantPenalty += 1;
+    if (titleCounts[key] > 1) redundantPenalty += 1;
+
+    // Reward genuine good posture so well-configured sites are not penalised.
+    const tl = String(finding.title || '').toLowerCase();
+    if (finding.severity === 'info' && positiveSignals.some(s => tl.includes(s))) {
+      postureBonus += 2;
     }
   }
 
-  // Calculate per-module scores
-  const moduleScores = {};
-  for (const [mod, modFindings] of Object.entries(byModule)) {
-    let modPenalty = 0;
-    const modSeverity = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
-    for (const f of modFindings) {
-      const w = SEVERITY_WEIGHTS[f.severity] || 0;
-      const cm = CONFIDENCE_MODIFIERS[f.confidence] || 0.7;
-      modPenalty += w * cm;
-      modSeverity[f.severity] = (modSeverity[f.severity] || 0) + 1;
+  // Diminishing returns on real-vulnerability penalty: score approaches but
+  // never instantly hits 0 from a single issue.
+  const softVuln = MAX_SCORE * (1 - Math.exp(-vulnerabilityPenalty / VULN_SOFTENING));
+  let score = MAX_SCORE - softVuln - recommendationPenalty;
+
+  // Flat deductions ONLY for confirmed vulnerabilities (not heuristics/recos).
+  if (confirmedCritical > 0) score -= 6;
+  if (confirmedHigh > 0) score -= 3;
+
+  redundantPenalty = Math.min(redundantPenalty, 10);
+  score -= redundantPenalty;
+  score += Math.min(uniqueVulnerabilityBonus, 8);
+  score += Math.min(postureBonus, 10);
+
+  if (fingerprint && fingerprint.technologies) {
+    let outdated = 0;
+    for (const tech of fingerprint.technologies) {
+      if (tech.isOutdated) outdated++;
     }
-    // Apply severity deductions per module
-    if (modSeverity.critical > 0) modPenalty += 15;
-    if (modSeverity.high > 0) modPenalty += 10;
-    if (modSeverity.medium > 0) modPenalty += 5;
-
-    const modScore = Math.max(0, MAX_SCORE - modPenalty);
-    moduleScores[mod] = Math.round(modScore * 10) / 10;
+    score -= Math.min(outdated * 3, 9);
   }
+  if (fingerprint && fingerprint.missingSecurityTxt) score -= 1;
 
-  // Calculate vulnerability density (findings per module)
-  const moduleCount = Object.keys(byModule).length || 1;
-  const vulnerabilityDensity = findings.length / moduleCount;
+  const scoreRounded = Math.round(Math.max(0, Math.min(100, score)) * 10) / 10;
 
-  // Base score calculation
-  let weightedScore = Math.max(0, MAX_SCORE - totalWeightedPenalty);
-
-  // Apply severity-based deductions
-  if (bySeverity.critical > 0) weightedScore -= 15;
-  if (bySeverity.high > 0) weightedScore -= 10;
-  if (bySeverity.medium > 0) weightedScore -= 5;
-
-  // Apply redundant finding penalty (capped)
-  redundantPenalty = Math.min(redundantPenalty, 15);
-  weightedScore -= redundantPenalty;
-
-  // Apply unique vulnerability bonus (finding real, distinct issues)
-  weightedScore += Math.min(uniqueVulnerabilityBonus, 10);
-
-  // Technology-specific adjustments from fingerprint
-  if (fingerprint) {
-    // Outdated technology detection
-    if (fingerprint.technologies) {
-      for (const tech of fingerprint.technologies) {
-        if (tech.isOutdated) {
-          weightedScore -= 5;
-        }
-      }
-    }
-    // Missing security.txt or other best practices
-    if (fingerprint.missingSecurityTxt) weightedScore -= 2;
-  }
-
-  // Clamp final score
-  let score = Math.round(Math.max(0, Math.min(100, weightedScore)) * 10) / 10;
-
-  // Determine grade with + modifiers for precision
+  // Realistic, differentiating grade bands (similar to industry scanners).
   let grade;
-  if (score >= 97) grade = 'A+';
-  else if (score >= 93) grade = 'A';
-  else if (score >= 90) grade = 'A-';
-  else if (score >= 87) grade = 'B+';
-  else if (score >= 83) grade = 'B';
-  else if (score >= 80) grade = 'B-';
-  else if (score >= 77) grade = 'C+';
-  else if (score >= 73) grade = 'C';
-  else if (score >= 70) grade = 'C-';
-  else if (score >= 67) grade = 'D+';
-  else if (score >= 63) grade = 'D';
-  else if (score >= 60) grade = 'D-';
+  if (scoreRounded >= 96) grade = 'A+';
+  else if (scoreRounded >= 90) grade = 'A';
+  else if (scoreRounded >= 86) grade = 'A-';
+  else if (scoreRounded >= 82) grade = 'B+';
+  else if (scoreRounded >= 78) grade = 'B';
+  else if (scoreRounded >= 74) grade = 'B-';
+  else if (scoreRounded >= 70) grade = 'C+';
+  else if (scoreRounded >= 65) grade = 'C';
+  else if (scoreRounded >= 60) grade = 'C-';
+  else if (scoreRounded >= 55) grade = 'D+';
+  else if (scoreRounded >= 50) grade = 'D';
+  else if (scoreRounded >= 45) grade = 'D-';
+  else if (scoreRounded >= 35) grade = 'E';
   else grade = 'F';
 
+  // Per-module score breakdown (for reporting/differentiation).
+  const moduleScores = {};
+  for (const [mod, modFindings] of Object.entries(byModule)) {
+    let mp = 0;
+    for (const f of modFindings) {
+      const w = SEVERITY_WEIGHTS[f.severity] || 0;
+      const cm = CONFIDENCE_MODIFIERS[f.confidence] || 0.2;
+      mp += isRecommendation(f) ? w * cm * RECOMMENDATION_WEIGHT : w * cm;
+    }
+    const soft = MAX_SCORE * (1 - Math.exp(-mp / VULN_SOFTENING));
+    moduleScores[mod] = Math.round((MAX_SCORE - soft) * 10) / 10;
+  }
+
+  const moduleCount = Object.keys(byModule).length || 1;
+  const vulnerabilityDensity = Math.round((findings.length / moduleCount) * 10) / 10;
+
   return {
-    score,
+    score: scoreRounded,
     grade,
     scoreBreakdown: {
-      overall: score,
-      weightedScore: Math.round(weightedScore * 10) / 10,
-      penalty: Math.round(totalWeightedPenalty * 10) / 10,
-      vulnerabilityDensity: Math.round(vulnerabilityDensity * 10) / 10,
+      overall: scoreRounded,
+      weightedScore: Math.round(scoreRounded * 10) / 10,
+      penalty: Math.round((softVuln + recommendationPenalty) * 10) / 10,
+      vulnerabilityDensity,
       redundantPenalty: Math.round(redundantPenalty * 10) / 10,
-      uniqueVulnerabilityBonus: Math.round(Math.min(uniqueVulnerabilityBonus, 10) * 10) / 10,
+      uniqueVulnerabilityBonus: Math.round(Math.min(uniqueVulnerabilityBonus, 8) * 10) / 10,
+      postureBonus: Math.round(Math.min(postureBonus, 10) * 10) / 10,
+      vulnerabilities: vulnCount,
+      recommendations: recCount,
       bySeverity,
       byModule: moduleScores,
       confidenceAdjusted: true,
