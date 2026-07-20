@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash VARCHAR(255),
     full_name VARCHAR(100),
     role VARCHAR(20) DEFAULT 'user' CHECK (role IN ('user', 'admin', 'api')),
-    api_key VARCHAR(64) UNIQUE,
+    api_key VARCHAR(128) UNIQUE,
     is_active BOOLEAN DEFAULT true,
     email_verified BOOLEAN DEFAULT false,
     token_version INTEGER DEFAULT 0,

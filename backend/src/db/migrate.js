@@ -28,7 +28,7 @@ const EXPECTED_USERS_COLUMNS = [
   `password_hash VARCHAR(255)`,
   `full_name VARCHAR(100)`,
   `role VARCHAR(20) DEFAULT 'user' CHECK (role IN ('user', 'admin', 'api'))`,
-  `api_key VARCHAR(64) UNIQUE`,
+  `api_key VARCHAR(128) UNIQUE`,
   `is_active BOOLEAN DEFAULT true`,
   `email_verified BOOLEAN DEFAULT false`,
   `token_version INTEGER DEFAULT 0`,
@@ -59,6 +59,11 @@ async function syncUsersColumns() {
   // a third-party managed DB). OAuth/Google users have no password, so relax the
   // constraint idempotently to prevent "null value in column password_hash".
   await query(`ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;`);
+
+  // A previously-created api_key column may be VARCHAR(64), which is too small for
+  // the 'vs_' + 64-hex-char key (66 chars) produced by generateApiKey(). Widen it
+  // idempotently so key generation/rotation never fails on insertion.
+  await query(`ALTER TABLE users ALTER COLUMN api_key TYPE VARCHAR(128);`);
 
   console.log(added ? `Synced users table (${added} column(s) added).` : 'Users table already in sync.');
 }

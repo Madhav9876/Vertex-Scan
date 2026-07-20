@@ -10,6 +10,7 @@ const authRoutes = require('./routes/auth');
 const scanRoutes = require('./routes/scans');
 const reportRoutes = require('./routes/reports');
 const oauthRoutes = require('./routes/oauth');
+const { recoverStuckScans } = require('./scanners/orchestrator');
 const { globalLimiter } = require('./middleware/rateLimit');
 const { requestContext, errorHandler, notFoundHandler, logSecurityEvent } = require('./middleware/security');
 
@@ -147,6 +148,7 @@ app.listen(PORT, () => {
   if (!isProduction) {
     logSecurityEvent('server_start', { env: process.env.NODE_ENV || 'development' }).catch(() => {});
   }
+  recoverStuckScans();
 });
 
 module.exports = app;

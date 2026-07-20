@@ -21,9 +21,57 @@ const SEVERITY_WEIGHTS = {
 const MAX_SCORE = 100;
 const CONFIDENCE_MODIFIERS = { high: 1.0, medium: 0.7, low: 0.4 };
 
+const SCAN_HARD_TIMEOUT_MS = parseInt(process.env.SCAN_HARD_TIMEOUT_MS, 10) || 120000;
+
+// Promisified timeout that rejects so the outer catch marks the scan failed.
+function withHardTimeout(promise, ms, scanId) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Scan exceeded hard timeout of ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+// Reset any scans left in a non-terminal state by a previous process crash.
+// Call this once at boot so orphaned 'running'/'pending' rows don't block the
+// concurrency quota forever.
+async function recoverStuckScans() {
+  try {
+    const res = await db.query(
+      `UPDATE scans SET status = 'failed', error_message = 'Recovered after server restart',
+              completed_at = NOW() WHERE status IN ('running', 'pending') RETURNING id`
+    );
+    if (res.rows.length) {
+      console.log(`[Orchestrator] Recovered ${res.rows.length} stuck scan(s) on startup`);
+    }
+  } catch (err) {
+    console.error('[Orchestrator] Stuck-scan recovery failed:', err.message);
+  }
+}
+
 async function runScan(scanId, userId) {
   console.log(`[Orchestrator] Starting scan ${scanId}`);
 
+  try {
+    await withHardTimeout(executeScan(scanId, userId), SCAN_HARD_TIMEOUT_MS, scanId);
+  } catch (err) {
+    console.error(`[Orchestrator] Scan ${scanId} failed:`, err.message);
+
+    await db.query(
+      'UPDATE scans SET status = $1, error_message = $2, completed_at = NOW() WHERE id = $3',
+      ['failed', err.message, scanId]
+    );
+
+    await db.query(
+      'INSERT INTO scan_history (scan_id, action, performed_by, details) VALUES ($1, $2, $3, $4)',
+      [scanId, 'failed', userId, JSON.stringify({ error: err.message })]
+    );
+
+    throw err;
+  }
+}
+
+async function executeScan(scanId, userId) {
   try {
     // Get scan details
     const scanResult = await db.query(
@@ -156,22 +204,7 @@ async function runScan(scanId, userId) {
       scoreBreakdown,
       fingerprint
     };
-
   } catch (err) {
-    console.error(`[Orchestrator] Scan ${scanId} failed:`, err.message);
-
-    // Update scan status to failed
-    await db.query(
-      'UPDATE scans SET status = $1, error_message = $2, completed_at = NOW() WHERE id = $3',
-      ['failed', err.message, scanId]
-    );
-
-    // Log scan failure
-    await db.query(
-      'INSERT INTO scan_history (scan_id, action, performed_by, details) VALUES ($1, $2, $3, $4)',
-      [scanId, 'failed', userId, JSON.stringify({ error: err.message })]
-    );
-
     throw err;
   }
 }
@@ -401,4 +434,4 @@ function calculateGrade(findings) {
   return { score: Math.round(result.score), grade: result.grade };
 }
 
-module.exports = { runScan, calculateGrade, calculateEnhancedGrade };
+module.exports = { runScan, recoverStuckScans, calculateGrade, calculateEnhancedGrade };
